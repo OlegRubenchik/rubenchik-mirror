@@ -42,7 +42,6 @@ jobs:
             mingw-w64-ucrt-x86_64-gst-plugins-good
             mingw-w64-ucrt-x86_64-gst-plugins-bad
             mingw-w64-ucrt-x86_64-gst-libav
-            mingw-w64-ucrt-x86_64-curl
             mingw-w64-ucrt-x86_64-libsoup3
             mingw-w64-ucrt-x86_64-glib-networking
             mingw-w64-ucrt-x86_64-ntldd
@@ -57,11 +56,6 @@ jobs:
           cmake -S uxplay-src -B uxplay-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DNO_MARCH_NATIVE=ON
           cmake --build uxplay-build
           ls -la uxplay-build/uxplay.exe
-
-      - name: Verify HLS (YouTube) support was compiled in
-        shell: msys2 {0}
-        run: |
-          ntldd uxplay-build/uxplay.exe | grep -qi libcurl || { echo "::error::uxplay.exe is not linked against libcurl (no HLS)"; exit 1; }
 
       - name: Verify OpenSSL >= 3.0 (GPL-3.0 compliance)
         shell: msys2 {0}
