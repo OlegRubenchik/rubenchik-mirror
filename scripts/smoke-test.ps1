@@ -12,13 +12,13 @@ $help = (Get-Content $out, "$out.err" -ErrorAction SilentlyContinue) -join "`n"
 Write-Host "exit code: $($hp.ExitCode)"
 Write-Host $help
 if ($hp.ExitCode -gt 1 -or [string]::IsNullOrWhiteSpace($help)) { throw "uxplay.exe -h failed (exit $($hp.ExitCode)) - missing DLL?" }
-foreach ($flag in '-n ', '-nh', '-fs', '-s wxh', '-fps', '-vs ', '-rc', '-pin') {
+foreach ($flag in '-n ', '-nh', '-fs', '-s wxh', '-fps', '-vs ', '-rc', '-pin', '-hls') {
   if ($help -notmatch [regex]::Escape($flag)) { throw "Flag '$flag' not found in 'uxplay -h' - update packaging/uxplayrc" }
 }
 
 Write-Host "== GStreamer elements"
 $required = 'appsrc','h264parse','avdec_h264','d3d11videosink','d3d11convert','videoconvert','audioconvert',
-            'audioresample','wasapisink','queue','avdec_aac','avdec_alac','level','jpegdec','imagefreeze','textoverlay','videoscale','volume'
+            'audioresample','wasapisink','queue','avdec_aac','avdec_alac','souphttpsrc','hlsdemux2','level','jpegdec','imagefreeze','textoverlay','videoscale','volume'
 $optional = 'd3d11h264dec','directsoundsink','autovideosink','autoaudiosink','aacparse','videoflip','audiobuffersplit'
 foreach ($e in $required + $optional) {
   & "$bin\gst-inspect-1.0.exe" $e *> $null
