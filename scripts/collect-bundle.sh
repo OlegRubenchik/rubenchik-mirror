@@ -43,12 +43,7 @@ for bin in "${roots[@]}"; do collect "$bin"; done | sort -u | while read -r dll;
   [[ -n "$dll" ]] && cp -n "$(cygpath -u "$dll")" "$OUT/bin/"
 done
 
-# Verify nothing is unresolved except Windows system DLLs.
-bad=0
-for bin in "${roots[@]}"; do
-  if ntldd -R "$bin" | grep -i "not found" | grep -v -i -E 'api-ms-win|ext-ms-win'; then bad=1; fi
-done
-[[ $bad -eq 0 ]] || { echo "::error::Unresolved dependencies"; exit 1; }
+# (Completeness is verified by scripts/smoke-test.ps1, which runs with a PATH that excludes MSYS2.)
 
 # License texts of MSYS2 packages whose files we redistribute.
 if [[ -d "$PREFIX/share/licenses" ]]; then cp -r "$PREFIX/share/licenses/." "$OUT/licenses/"; fi
