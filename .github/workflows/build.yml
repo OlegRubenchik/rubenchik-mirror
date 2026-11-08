@@ -50,7 +50,7 @@ jobs:
           git clone "$UXPLAY_REPO" uxplay-src
           git -C uxplay-src checkout "$UXPLAY_REF"
           # Make the binary portable to any x86-64 CPU (the runner's CPU is not the user's CPU).
-          grep -rl -- '-march=native' uxplay-src --include=CMakeLists.txt | xargs -r sed -i 's/-march=native//g'
+          { grep -rl --include=CMakeLists.txt -e '-march=native' uxplay-src || true; } | xargs -r sed -i 's/-march=native//g'
           cmake -S uxplay-src -B uxplay-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DNO_MARCH_NATIVE=ON
           cmake --build uxplay-build
           ls -la uxplay-build/uxplay.exe
