@@ -16,6 +16,9 @@ foreach ($flag in '-n ', '-nh', '-fs', '-s wxh', '-fps', '-vs ', '-rc', '-pin', 
   if ($help -notmatch [regex]::Escape($flag)) { throw "Flag '$flag' not found in 'uxplay -h' - update packaging/uxplayrc" }
 }
 
+Write-Host "== GSettings schemas (needed by HLS/YouTube playback)"
+if (-not (Test-Path "$App\share\glib-2.0\schemas\gschemas.compiled")) { throw "gschemas.compiled missing from bundle" }
+
 Write-Host "== GStreamer elements"
 $required = 'appsrc','h264parse','avdec_h264','d3d11videosink','d3d11convert','videoconvert','audioconvert',
             'audioresample','wasapisink','queue','avdec_aac','avdec_alac','souphttpsrc','hlsdemux2','level','jpegdec','imagefreeze','textoverlay','videoscale','volume'
