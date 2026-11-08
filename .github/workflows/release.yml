@@ -3,6 +3,12 @@ name: Release
 on:
   push:
     tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version without the leading v (e.g. 1.2.0). Creates tag v<version> on the selected branch.'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -10,6 +16,8 @@ permissions:
 jobs:
   build:
     uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ inputs.version }}
 
   publish:
     needs: build
@@ -26,12 +34,14 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
+          if [ -n "$INPUT_VERSION" ]; then TAG="v$INPUT_VERSION"; else TAG="$GITHUB_REF_NAME"; fi
           files="release/RubenchikMirror-Setup.exe release/RubenchikMirror-Setup.exe.sha256"
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             # Release was already created in the web UI: just attach the installer.
-            gh release upload "$GITHUB_REF_NAME" $files --repo "$GITHUB_REPOSITORY" --clobber
+            gh release upload "$TAG" $files --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" $files \
-              --repo "$GITHUB_REPOSITORY" --title "Rubenchik Mirror $GITHUB_REF_NAME" --generate-notes --verify-tag
+            gh release create "$TAG" $files \
+              --repo "$GITHUB_REPOSITORY" --title "Rubenchik Mirror $TAG" --generate-notes --target "$GITHUB_SHA"
           fi
