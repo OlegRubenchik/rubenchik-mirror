@@ -18,7 +18,7 @@ foreach ($flag in '-n ', '-nh', '-fs', '-s wxh', '-fps', '-vs ', '-rc') {
 
 Write-Host "== GStreamer elements"
 $required = 'appsrc','h264parse','avdec_h264','d3d11videosink','d3d11convert','videoconvert','audioconvert',
-            'audioresample','wasapisink','queue','avdec_aac','avdec_alac'
+            'audioresample','wasapisink','queue','avdec_aac','avdec_alac','level','jpegdec','imagefreeze','textoverlay','videoscale','volume'
 $optional = 'd3d11h264dec','directsoundsink','autovideosink','autoaudiosink','aacparse','videoflip','audiobuffersplit'
 foreach ($e in $required + $optional) {
   & "$bin\gst-inspect-1.0.exe" $e *> $null

@@ -14,6 +14,7 @@ PLUGINS=(
   videoparsersbad audioparsers libav
   d3d11 d3d12 wasapi wasapi2 directsound autodetect
   audioconvert audioresample volume videoconvertscale videofilter videorate audiorate audiobuffersplit
+  level jpeg imagefreeze pango
   rtp rtpmanager udp tcp isomp4 mpegtsdemux opus
 )
 
