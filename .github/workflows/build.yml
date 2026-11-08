@@ -42,6 +42,8 @@ jobs:
             mingw-w64-ucrt-x86_64-gst-plugins-good
             mingw-w64-ucrt-x86_64-gst-plugins-bad
             mingw-w64-ucrt-x86_64-gst-libav
+            mingw-w64-ucrt-x86_64-libsoup3
+            mingw-w64-ucrt-x86_64-glib-networking
             mingw-w64-ucrt-x86_64-ntldd
 
       - name: Build UxPlay
@@ -51,6 +53,9 @@ jobs:
           git -C uxplay-src checkout "$UXPLAY_REF"
           # Make the binary portable to any x86-64 CPU (the runner's CPU is not the user's CPU).
           { grep -rl --include=CMakeLists.txt -e '-march=native' uxplay-src || true; } | xargs -r sed -i 's/-march=native//g'
+          # Windows has no LANG/LANGUAGE variables; UxPlay asserts on that when -hls is used. Fall back to en-US.
+          sed -i 's|g_assert(!lang_system.empty());|if (lang_system.empty()) { lang_system = "en-US"; }|' uxplay-src/uxplay.cpp
+          grep -q 'lang_system = "en-US"' uxplay-src/uxplay.cpp || { echo "::error::lang_system patch did not apply"; exit 1; }
           cmake -S uxplay-src -B uxplay-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DNO_MARCH_NATIVE=ON
           cmake --build uxplay-build
           ls -la uxplay-build/uxplay.exe

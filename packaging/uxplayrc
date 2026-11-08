@@ -15,6 +15,10 @@ vs d3d11videosink
 s 1920x1080@60
 fps 60
 
+# YouTube: tapping the AirPlay icon in the YouTube iOS app plays the video directly on this PC
+# (the phone becomes a remote). Without this option only the audio is received.
+hls
+
 # Audio is on by default. Uncomment to pick a specific Windows audio sink:
 # as wasapisink
 

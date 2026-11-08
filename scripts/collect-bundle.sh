@@ -16,6 +16,7 @@ PLUGINS=(
   audioconvert audioresample volume videoconvertscale videofilter videorate audiorate audiobuffersplit
   level jpeg imagefreeze pango
   rtp rtpmanager udp tcp isomp4 mpegtsdemux opus
+  adaptivedemux2 soup hls
 )
 
 rm -rf "$OUT"
@@ -28,6 +29,10 @@ for p in "${PLUGINS[@]}"; do
   if [[ -f "$f" ]]; then cp "$f" "$OUT/lib/gstreamer-1.0/"; else missing+=("$p"); fi
 done
 if [[ ${#missing[@]} -gt 0 ]]; then echo "::warning::GStreamer plugins not found (skipped): ${missing[*]}"; fi
+
+# GIO TLS backend (glib-networking): needed for https downloads of YouTube HLS segments.
+mkdir -p "$OUT/lib/gio/modules"
+cp "$PREFIX"/lib/gio/modules/libgio*.dll "$OUT/lib/gio/modules/"
 
 cp "$PREFIX/libexec/gstreamer-1.0/gst-plugin-scanner.exe" "$OUT/libexec/gstreamer-1.0/"
 # gst-inspect is copied for the CI check only; the workflow removes it before packaging.
