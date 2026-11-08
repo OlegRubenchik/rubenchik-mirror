@@ -42,17 +42,20 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Shortcuts:"
-Name: "autostart"; Description: "Start {#AppName} automatically when Windows starts"; GroupDescription: "Startup:"
+Name: "autostart"; Description: "Start {#AppName} automatically when Windows starts"; GroupDescription: "Startup:"; Flags: unchecked
+Name: "pin"; Description: "Require a PIN code on the iPhone before mirroring (recommended)"; GroupDescription: "Security:"
 
 [Files]
 Source: "{#AppDir}\bin\*"; DestDir: "{app}\bin"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#AppDir}\lib\*"; DestDir: "{app}\lib"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#AppDir}\libexec\*"; DestDir: "{app}\libexec"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#AppDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
-Source: "{#AppDir}\uxplayrc"; DestDir: "{app}"; Flags: ignoreversion
+Source: "uxplayrc.pin"; DestDir: "{app}"; DestName: "uxplayrc"; Flags: ignoreversion; Tasks: pin
+Source: "uxplayrc"; DestDir: "{app}"; DestName: "uxplayrc"; Flags: ignoreversion; Tasks: not pin
 Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#AppDir}\UxPlay-LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

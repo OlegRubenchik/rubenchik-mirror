@@ -55,11 +55,20 @@ jobs:
           cmake --build uxplay-build
           ls -la uxplay-build/uxplay.exe
 
+      - name: Verify OpenSSL >= 3.0 (GPL-3.0 compliance)
+        shell: msys2 {0}
+        run: |
+          pacman -Q mingw-w64-ucrt-x86_64-openssl
+          openssl version
+          openssl version | grep -E '^OpenSSL 3\.' || { echo "::error::OpenSSL 3.x required"; exit 1; }
+          ntldd uxplay-build/uxplay.exe | grep -i libcrypto
+          ntldd uxplay-build/uxplay.exe | grep -qi 'libcrypto-3' || { echo "::error::uxplay.exe is not linked against OpenSSL 3"; exit 1; }
+
       - name: Collect runtime bundle
         shell: msys2 {0}
         run: |
           bash scripts/collect-bundle.sh dist/app uxplay-build/uxplay.exe
-          cp packaging/uxplayrc dist/app/uxplayrc
+          cp packaging/uxplayrc.pin dist/app/uxplayrc   # smoke-test the PIN-enabled config
           cp uxplay-src/LICENSE dist/app/UxPlay-LICENSE.txt
 
       - name: Smoke test (clean PATH, no MSYS2)
@@ -101,16 +110,21 @@ jobs:
         shell: pwsh
         run: |
           $dir = "$env:RUNNER_TEMP\rm-install"
-          Start-Process dist/RubenchikMirror-Setup.exe -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=desktopicon,autostart /DIR=`"$dir`" /LOG=`"$env:RUNNER_TEMP\inst.log`"" -Wait
+          Start-Process dist/RubenchikMirror-Setup.exe -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=desktopicon,autostart,pin /DIR=`"$dir`" /LOG=`"$env:RUNNER_TEMP\inst.log`"" -Wait
           if (-not (Test-Path "$dir\bin\uxplay.exe")) { Get-Content "$env:RUNNER_TEMP\inst.log"; throw "uxplay.exe not installed" }
           netsh advfirewall firewall show rule name="Rubenchik Mirror" | Out-String | Write-Host
           if ((netsh advfirewall firewall show rule name="Rubenchik Mirror" | Out-String) -match 'No rules match') { throw "firewall rule missing" }
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          $startup = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup\Rubenchik Mirror.lnk"
+          if (-not (Test-Path $startup)) { throw "autostart shortcut missing although the task was selected" }
+          if ((Get-Content "$dir\uxplayrc") -notcontains 'pin') { throw "PIN task selected but 'pin' missing from installed uxplayrc" }
+          foreach ($f in 'LICENSE','THIRD_PARTY_NOTICES.md','UxPlay-LICENSE.txt','README.md') { if (-not (Test-Path "$dir\$f")) { throw "$f not installed" } }
           & "$dir\bin\uxplay.exe" -h *> $null
           if ($LASTEXITCODE -gt 1) { throw "installed uxplay.exe failed to start" }
           Start-Process "$dir\unins000.exe" -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -Wait
           Start-Sleep -Seconds 3
           if (Test-Path "$dir\bin\uxplay.exe") { throw "uninstall left files behind" }
+          if (Test-Path $startup) { throw "uninstall left the autostart shortcut" }
           if ((netsh advfirewall firewall show rule name="Rubenchik Mirror" | Out-String) -notmatch 'No rules match') { throw "uninstall left firewall rule" }
           exit 0
 

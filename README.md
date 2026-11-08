@@ -21,7 +21,8 @@
 - Shows up as **"Rubenchik Mirror"** in the iPhone / iPad *Screen Mirroring* list. No app needed on the phone.
 - Fullscreen, hardware-accelerated (Direct3D 11) video at up to 1080p / 60 fps, with audio.
 - Plug and play: all libraries and GStreamer plugins are bundled. No MSYS2, GStreamer or Bonjour install needed.
-- Windows Firewall rule (private networks), desktop shortcut and optional autostart are set up by the installer; the uninstaller removes everything.
+- Optional PIN protection: the iPhone must enter a code shown on the PC before mirroring (on by default in the installer).
+- Windows Firewall rule (private networks) and desktop shortcut are set up by the installer; autostart is optional (off by default). The uninstaller removes everything.
 - Open source, built from source by GitHub Actions, based on [UxPlay](https://github.com/FDH2/UxPlay).
 
 ## Requirements
@@ -34,11 +35,13 @@
 
 1. [**Download RubenchikMirror-Setup.exe**](https://github.com/OlegRubenchik/rubenchik-mirror/releases/latest/download/RubenchikMirror-Setup.exe).
 2. Run it and click through the wizard. The installer is unsigned: if Windows shows **"Windows protected your PC"**, click **More info → Run anyway**. (Check the download against `RubenchikMirror-Setup.exe.sha256` on the release page if you like.)
-3. Start **Rubenchik Mirror** from the desktop shortcut (it also starts with Windows if you left that box ticked).
+3. Start **Rubenchik Mirror** from the desktop shortcut or Start menu. Installer options: desktop shortcut, *start with Windows* (unchecked by default) and *require a PIN* (checked by default).
 
 ## Usage
 
 On the iPhone: open **Control Center → Screen Mirroring → Rubenchik Mirror**. The screen appears fullscreen on the PC. Press **Alt+Enter** to toggle fullscreen, close the window or stop the app to disconnect.
+
+**PIN:** the first time an iPhone connects, a 4-digit code appears on the PC screen (and in the console window) and the iPhone asks for it. After you enter it once, the iPhone remembers this PC. To change this later, add or remove the line `pin` in `uxplayrc` (use `pw yourpassword`, at least 6 characters, instead for a fixed password). Note that PIN protection stops casual use by other devices on your network but does not encrypt anything beyond what AirPlay already does.
 
 To mirror to a TV, connect the laptop by HDMI and make the TV the main display (Win+P → *Duplicate* or *Second screen only*).
 
@@ -54,7 +57,7 @@ Settings (resolution, frame rate, audio device, latency) are in `C:\Program File
 
 ## Uninstall
 
-*Settings → Apps → Installed apps → Rubenchik Mirror → Uninstall.* This removes the program, shortcuts, autostart entry and firewall rule.
+*Settings → Apps → Installed apps → Rubenchik Mirror → Uninstall.* This removes the program, shortcuts, the autostart entry (if you enabled it) and the firewall rule.
 
 ## Build from source
 
@@ -62,6 +65,7 @@ Everything is built in GitHub Actions ([`build.yml`](.github/workflows/build.yml
 
 ## Credits
 
+- Rubenchik Mirror is **based on UxPlay and modified by Oleg Rubenchik** (Windows packaging, installer, defaults, branding).
 - [UxPlay](https://github.com/FDH2/UxPlay) by antimof, FDH2 and contributors, which builds on RPiPlay, Shairplay and others.
 - [GStreamer](https://gstreamer.freedesktop.org/), [FFmpeg](https://ffmpeg.org/), [libplist](https://github.com/libimobiledevice/libplist), [OpenSSL](https://www.openssl.org/), [MSYS2](https://www.msys2.org/), [Inno Setup](https://jrsoftware.org/isinfo.php).
 
@@ -69,7 +73,7 @@ See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## License
 
-[GPL-3.0](LICENSE). Code signing of the installer may be added in the future; until then Windows SmartScreen will warn as described above.
+[GPL-3.0](LICENSE). The license, `THIRD_PARTY_NOTICES.md` and the bundled components' license texts are also installed with the app. The build is linked against OpenSSL 3.x (checked in CI), as UxPlay's license note requires. Code signing of the installer may be added in the future; until then Windows SmartScreen will warn as described above.
 
 ---
 

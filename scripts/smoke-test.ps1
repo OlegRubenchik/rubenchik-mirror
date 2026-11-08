@@ -12,7 +12,7 @@ $help = (Get-Content $out, "$out.err" -ErrorAction SilentlyContinue) -join "`n"
 Write-Host "exit code: $($hp.ExitCode)"
 Write-Host $help
 if ($hp.ExitCode -gt 1 -or [string]::IsNullOrWhiteSpace($help)) { throw "uxplay.exe -h failed (exit $($hp.ExitCode)) - missing DLL?" }
-foreach ($flag in '-n ', '-nh', '-fs', '-s wxh', '-fps', '-vs ', '-rc') {
+foreach ($flag in '-n ', '-nh', '-fs', '-s wxh', '-fps', '-vs ', '-rc', '-pin') {
   if ($help -notmatch [regex]::Escape($flag)) { throw "Flag '$flag' not found in 'uxplay -h' - update packaging/uxplayrc" }
 }
 

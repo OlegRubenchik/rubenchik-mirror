@@ -1,0 +1,26 @@
+# Rubenchik Mirror - UxPlay startup options (one option per line, without the leading "-").
+# Edit this file, then restart Rubenchik Mirror. Reference: uxplay -h
+
+# Name shown in the iPhone's Screen Mirroring list, without "@hostname" suffix
+n "Rubenchik Mirror"
+nh
+
+# Fullscreen (works with the Direct3D 11 video sink)
+fs
+
+# Direct3D 11 video sink (Alt+Enter toggles fullscreen)
+vs d3d11videosink
+
+# Request 1080p at 60 fps from the iPhone (it may choose a lower rate)
+s 1920x1080@60
+fps 60
+
+# Audio is on by default. Uncomment to pick a specific Windows audio sink:
+# as wasapisink
+
+# Uncomment for lowest latency (disables audio/video timestamp sync; best for games/UI, not movies):
+# vsync no
+
+# Require a one-time 4-digit PIN (shown on the PC screen) the first time an iPhone connects.
+# The iPhone then remembers this PC as trusted. Remove this line to disable.
+pin
