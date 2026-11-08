@@ -36,7 +36,7 @@ cp "$PREFIX/bin/gst-inspect-1.0.exe" "$OUT/bin/"
 # executables and plugins covers all transitive DLLs). Keep only DLLs from the MSYS2 prefix.
 prefix_win="$(cygpath -w "$PREFIX" | tr 'A-Z' 'a-z')"
 collect() {
-  ntldd -R "$1" | sed -n 's/.*=> *\(.*\) (0x.*//p' | tr 'A-Z' 'a-z' | grep -F "$prefix_win" || true
+  ntldd -R "$1" | awk '$2=="=>" {print $3}' | tr "A-Z" "a-z" | grep -F "$prefix_win" || true
 }
 mapfile -t roots < <(find "$OUT" -name '*.exe' -o -name '*.dll')
 for bin in "${roots[@]}"; do collect "$bin"; done | sort -u | while read -r dll; do

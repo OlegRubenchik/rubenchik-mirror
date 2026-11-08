@@ -6,9 +6,12 @@ $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"   # no MSYS2, no Git, no 
 Remove-Item Env:GST_PLUGIN_PATH, Env:GST_PLUGIN_SYSTEM_PATH, Env:GST_REGISTRY -ErrorAction SilentlyContinue
 
 Write-Host "== uxplay -h"
-$help = & "$bin\uxplay.exe" -h 2>&1 | Out-String
+$out = Join-Path $env:RUNNER_TEMP 'help.txt'
+$hp = Start-Process -FilePath "$bin\uxplay.exe" -ArgumentList '-h' -NoNewWindow -Wait -PassThru -RedirectStandardOutput $out -RedirectStandardError "$out.err"
+$help = (Get-Content $out, "$out.err" -ErrorAction SilentlyContinue) -join "`n"
+Write-Host "exit code: $($hp.ExitCode)"
 Write-Host $help
-if ($LASTEXITCODE -gt 1) { throw "uxplay.exe -h exited with $LASTEXITCODE (missing DLL?)" }
+if ($hp.ExitCode -gt 1 -or [string]::IsNullOrWhiteSpace($help)) { throw "uxplay.exe -h failed (exit $($hp.ExitCode)) - missing DLL?" }
 foreach ($flag in '-n ', '-nh', '-fs', '-s wxh', '-fps', '-vs ', '-rc') {
   if ($help -notmatch [regex]::Escape($flag)) { throw "Flag '$flag' not found in 'uxplay -h' - update packaging/uxplayrc" }
 }
