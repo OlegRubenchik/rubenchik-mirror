@@ -21,7 +21,7 @@ if (-not (Test-Path "$App\share\glib-2.0\schemas\gschemas.compiled")) { throw "g
 
 Write-Host "== GStreamer elements"
 $required = 'appsrc','h264parse','avdec_h264','d3d11videosink','d3d11convert','videoconvert','audioconvert',
-            'audioresample','wasapisink','queue','avdec_aac','avdec_alac','souphttpsrc','hlsdemux2','avdec_vp9','vp9parse','deinterlace','level','jpegdec','imagefreeze','textoverlay','videoscale','volume'
+            'audioresample','wasapisink','queue','avdec_aac','avdec_alac','souphttpsrc','hlsdemux2','avdec_vp9','vp9parse','deinterlace','id3demux','icydemux','aacparse','qtdemux','level','jpegdec','imagefreeze','textoverlay','videoscale','volume'
 $optional = 'vp9dec','d3d11h264dec','directsoundsink','autovideosink','autoaudiosink','aacparse','videoflip','audiobuffersplit'
 foreach ($e in $required + $optional) {
   & "$bin\gst-inspect-1.0.exe" $e *> $null

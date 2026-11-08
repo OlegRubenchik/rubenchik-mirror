@@ -17,7 +17,7 @@ PLUGINS=(
   level jpeg imagefreeze pango
   rtp rtpmanager udp tcp isomp4 mpegtsdemux opus
   adaptivedemux2 soup hls
-  vpx deinterlace
+  vpx deinterlace id3demux icydemux
 )
 
 rm -rf "$OUT"
