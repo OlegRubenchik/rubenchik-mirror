@@ -49,6 +49,7 @@ Name: "pin"; Description: "Require a PIN code on the iPhone before mirroring (re
 Source: "{#AppDir}\bin\*"; DestDir: "{app}\bin"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#AppDir}\lib\*"; DestDir: "{app}\lib"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#AppDir}\libexec\*"; DestDir: "{app}\libexec"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#AppDir}\share\*"; DestDir: "{app}\share"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#AppDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "uxplayrc.pin"; DestDir: "{app}"; DestName: "uxplayrc"; Flags: ignoreversion; Tasks: pin
 Source: "uxplayrc"; DestDir: "{app}"; DestName: "uxplayrc"; Flags: ignoreversion; Tasks: not pin

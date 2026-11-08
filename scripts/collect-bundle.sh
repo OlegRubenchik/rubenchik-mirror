@@ -34,6 +34,12 @@ if [[ ${#missing[@]} -gt 0 ]]; then echo "::warning::GStreamer plugins not found
 mkdir -p "$OUT/lib/gio/modules"
 cp "$PREFIX"/lib/gio/modules/libgio*.dll "$OUT/lib/gio/modules/"
 
+# GSettings schemas: GStreamer playbin/GIO abort with "No GSettings schemas are installed" without them
+# (this crashed YouTube/HLS playback). GLib finds them relative to its DLL: <app>/share/glib-2.0/schemas.
+mkdir -p "$OUT/share/glib-2.0/schemas"
+cp "$PREFIX/share/glib-2.0/schemas/gschemas.compiled" "$OUT/share/glib-2.0/schemas/" \
+  || { echo "::error::gschemas.compiled not found in $PREFIX"; exit 1; }
+
 cp "$PREFIX/libexec/gstreamer-1.0/gst-plugin-scanner.exe" "$OUT/libexec/gstreamer-1.0/"
 # gst-inspect is copied for the CI check only; the workflow removes it before packaging.
 cp "$PREFIX/bin/gst-inspect-1.0.exe" "$OUT/bin/"
