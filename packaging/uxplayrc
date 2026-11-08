@@ -2,7 +2,7 @@
 # Edit this file, then restart Rubenchik Mirror. Reference: uxplay -h
 
 # Name shown in the iPhone's Screen Mirroring list, without "@hostname" suffix
-n Rubenchik Mirror
+n "Rubenchik Mirror"
 nh
 
 # Fullscreen (works with the Direct3D 11 video sink)
