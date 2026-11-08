@@ -26,39 +26,31 @@ for p in "${PLUGINS[@]}"; do
   f="$PREFIX/lib/gstreamer-1.0/libgst$p.dll"
   if [[ -f "$f" ]]; then cp "$f" "$OUT/lib/gstreamer-1.0/"; else missing+=("$p"); fi
 done
-[[ ${#missing[@]} -gt 0 ]] && echo "::warning::GStreamer plugins not found (skipped): ${missing[*]}"
+if [[ ${#missing[@]} -gt 0 ]]; then echo "::warning::GStreamer plugins not found (skipped): ${missing[*]}"; fi
 
 cp "$PREFIX/libexec/gstreamer-1.0/gst-plugin-scanner.exe" "$OUT/libexec/gstreamer-1.0/"
 # gst-inspect is copied for the CI check only; the workflow removes it before packaging.
 cp "$PREFIX/bin/gst-inspect-1.0.exe" "$OUT/bin/"
 
-# Resolve DLL dependencies (recursively) of every binary; keep only those from the MSYS2 prefix.
+# Resolve DLL dependencies of every binary (ntldd -R is already recursive, so one pass over the
+# executables and plugins covers all transitive DLLs). Keep only DLLs from the MSYS2 prefix.
 prefix_win="$(cygpath -w "$PREFIX" | tr 'A-Z' 'a-z')"
 collect() {
-  ntldd -R "$1" | sed -n 's/.*=> *\(.*\) (0x.*/\1/p' | while read -r dll; do
-    [[ -z "$dll" || "$dll" == "not found" ]] && continue
-    low="$(echo "$dll" | tr 'A-Z' 'a-z')"
-    [[ "$low" == "$prefix_win"* ]] && cygpath -u "$dll"
-  done
+  ntldd -R "$1" | sed -n 's/.*=> *\(.*\) (0x.*//p' | tr 'A-Z' 'a-z' | grep -F "$prefix_win" || true
 }
-find "$OUT" \( -name '*.exe' -o -name '*.dll' \) | while read -r bin; do collect "$bin"; done | sort -u | while read -r dll; do
-  cp -n "$dll" "$OUT/bin/"
-done
-# Plugins' dependencies may themselves pull in more DLLs: iterate until stable.
-for _ in 1 2 3; do
-  find "$OUT/bin" -name '*.dll' | while read -r bin; do collect "$bin"; done | sort -u | while read -r dll; do
-    cp -n "$dll" "$OUT/bin/"
-  done
+mapfile -t roots < <(find "$OUT" -name '*.exe' -o -name '*.dll')
+for bin in "${roots[@]}"; do collect "$bin"; done | sort -u | while read -r dll; do
+  [[ -n "$dll" ]] && cp -n "$(cygpath -u "$dll")" "$OUT/bin/"
 done
 
 # Verify nothing is unresolved except Windows system DLLs.
 bad=0
-while read -r bin; do
-  if ntldd -R "$bin" | grep -i "not found" | grep -v -i -E 'api-ms-win|ext-ms-win' ; then bad=1; fi
-done < <(find "$OUT" \( -name '*.exe' -o -name '*.dll' \))
+for bin in "${roots[@]}"; do
+  if ntldd -R "$bin" | grep -i "not found" | grep -v -i -E 'api-ms-win|ext-ms-win'; then bad=1; fi
+done
 [[ $bad -eq 0 ]] || { echo "::error::Unresolved dependencies"; exit 1; }
 
 # License texts of MSYS2 packages whose files we redistribute.
-[[ -d "$PREFIX/share/licenses" ]] && cp -r "$PREFIX/share/licenses/." "$OUT/licenses/" || true
+if [[ -d "$PREFIX/share/licenses" ]]; then cp -r "$PREFIX/share/licenses/." "$OUT/licenses/"; fi
 
 echo "Bundle size:"; du -sh "$OUT"; ls "$OUT/bin" | wc -l
