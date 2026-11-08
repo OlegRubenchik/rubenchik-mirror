@@ -1,0 +1,123 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  UXPLAY_REPO: https://github.com/FDH2/UxPlay.git
+  # Pinned UxPlay commit (master, v1.74 - includes the built-in mDNS responder, so no Bonjour is required).
+  UXPLAY_REF: 05b0275cb1b726592700e47a6e0307544b3d3a52
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-libplist
+            mingw-w64-ucrt-x86_64-gstreamer
+            mingw-w64-ucrt-x86_64-gst-plugins-base
+            mingw-w64-ucrt-x86_64-gst-plugins-good
+            mingw-w64-ucrt-x86_64-gst-plugins-bad
+            mingw-w64-ucrt-x86_64-gst-libav
+            mingw-w64-ucrt-x86_64-ntldd
+
+      - name: Build UxPlay
+        shell: msys2 {0}
+        run: |
+          git clone "$UXPLAY_REPO" uxplay-src
+          git -C uxplay-src checkout "$UXPLAY_REF"
+          # Make the binary portable to any x86-64 CPU (the runner's CPU is not the user's CPU).
+          grep -rl -- '-march=native' uxplay-src --include=CMakeLists.txt | xargs -r sed -i 's/-march=native//g'
+          cmake -S uxplay-src -B uxplay-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DNO_MARCH_NATIVE=ON
+          cmake --build uxplay-build
+          ls -la uxplay-build/uxplay.exe
+
+      - name: Collect runtime bundle
+        shell: msys2 {0}
+        run: |
+          bash scripts/collect-bundle.sh dist/app uxplay-build/uxplay.exe
+          cp packaging/uxplayrc dist/app/uxplayrc
+          cp uxplay-src/LICENSE dist/app/UxPlay-LICENSE.txt
+
+      - name: Smoke test (clean PATH, no MSYS2)
+        shell: pwsh
+        run: ./scripts/smoke-test.ps1 -App "$PWD/dist/app"
+
+      - name: Remove CI-only tools from bundle
+        shell: pwsh
+        run: Remove-Item dist/app/bin/gst-inspect-1.0.exe
+
+      - name: Determine version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = "${{ inputs.version }}"
+          if (-not $v -and $env:GITHUB_REF -like 'refs/tags/v*') { $v = $env:GITHUB_REF_NAME.TrimStart('v') }
+          if (-not $v) { $v = "0.0.0-dev" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Install Inno Setup if missing
+        shell: pwsh
+        run: |
+          $iscc = Get-Command iscc -ErrorAction SilentlyContinue
+          if (-not $iscc -and -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { $iscc = (Get-Command iscc).Source }
+          & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" packaging/installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          $h = (Get-FileHash dist/RubenchikMirror-Setup.exe -Algorithm SHA256).Hash.ToLower()
+          "$h  RubenchikMirror-Setup.exe" | Out-File -Encoding ascii dist/RubenchikMirror-Setup.exe.sha256
+          Get-Item dist/RubenchikMirror-Setup.exe | Format-List Name, Length
+          Get-Content dist/RubenchikMirror-Setup.exe.sha256
+
+      - name: Silent install / uninstall test
+        shell: pwsh
+        run: |
+          $dir = "$env:RUNNER_TEMP\rm-install"
+          Start-Process dist/RubenchikMirror-Setup.exe -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=desktopicon,autostart /DIR=`"$dir`" /LOG=`"$env:RUNNER_TEMP\inst.log`"" -Wait
+          if (-not (Test-Path "$dir\bin\uxplay.exe")) { Get-Content "$env:RUNNER_TEMP\inst.log"; throw "uxplay.exe not installed" }
+          netsh advfirewall firewall show rule name="Rubenchik Mirror" | Out-String | Write-Host
+          if ((netsh advfirewall firewall show rule name="Rubenchik Mirror" | Out-String) -match 'No rules match') { throw "firewall rule missing" }
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          & "$dir\bin\uxplay.exe" -h *> $null
+          if ($LASTEXITCODE -gt 1) { throw "installed uxplay.exe failed to start" }
+          Start-Process "$dir\unins000.exe" -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -Wait
+          Start-Sleep -Seconds 3
+          if (Test-Path "$dir\bin\uxplay.exe") { throw "uninstall left files behind" }
+          if ((netsh advfirewall firewall show rule name="Rubenchik Mirror" | Out-String) -notmatch 'No rules match') { throw "uninstall left firewall rule" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RubenchikMirror-installer
+          path: |
+            dist/RubenchikMirror-Setup.exe
+            dist/RubenchikMirror-Setup.exe.sha256
+          if-no-files-found: error
+          retention-days: 14

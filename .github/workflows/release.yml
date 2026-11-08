@@ -1,0 +1,31 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: RubenchikMirror-installer
+          path: release
+      - name: Verify checksum
+        run: cd release && sha256sum -c RubenchikMirror-Setup.exe.sha256
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/RubenchikMirror-Setup.exe release/RubenchikMirror-Setup.exe.sha256 \
+            --repo "$GITHUB_REPOSITORY" --title "Rubenchik Mirror $GITHUB_REF_NAME" --generate-notes --verify-tag

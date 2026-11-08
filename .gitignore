@@ -1,0 +1,9 @@
+dist/
+build/
+*.log
+*.exe
+*.pyc
+__pycache__/
+.vscode/
+.idea/
+.env

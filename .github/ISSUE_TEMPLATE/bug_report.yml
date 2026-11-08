@@ -1,0 +1,39 @@
+name: Bug report
+description: Something does not work (not in the Screen Mirroring list, black screen, lag, crash)
+labels: [bug]
+body:
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      description: Press Win+R and type winver.
+      placeholder: Windows 11 23H2 (build 22631)
+    validations:
+      required: true
+  - type: input
+    id: ios
+    attributes:
+      label: iPhone / iPad model and iOS version
+      placeholder: iPhone 13 Pro Max, iOS 18.x
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Rubenchik Mirror version
+      placeholder: v1.0.0
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Network type (5 GHz Wi-Fi, 2.4 GHz, Ethernet), Windows network profile (Private or Public), what you did, what you expected, what happened.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: In PowerShell run the command below, reproduce the problem and paste the output. Command - & "C:\Program Files\Rubenchik Mirror\bin\uxplay.exe" -rc "C:\Program Files\Rubenchik Mirror\uxplayrc" -d
+      render: text
