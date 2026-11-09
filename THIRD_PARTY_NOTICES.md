@@ -26,8 +26,9 @@ folder next to the application.
 
 The exact UxPlay source used for each release is the commit pinned in
 [`.github/workflows/build.yml`](.github/workflows/build.yml) (`UXPLAY_REF`) from <https://github.com/FDH2/UxPlay>,
-built from unmodified UxPlay source except for removing `-march=native` so the binary runs on any x86-64 CPU.
-Source for the bundled MSYS2 packages is available from <https://packages.msys2.org/> and
+built with the changes in [`patches/`](patches) (mpv backend, branded window, updater and Windows fixes, all
+GPL-3.0, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)) and with `-march=native` removed so the binary runs on any
+x86-64 CPU. Source for the bundled MSYS2 packages is available from <https://packages.msys2.org/> and
 <https://github.com/msys2/MINGW-packages>.
 
 ## Trademarks
