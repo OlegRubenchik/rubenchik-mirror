@@ -22,6 +22,7 @@
 - Fullscreen, hardware-accelerated (Direct3D 11) video at up to 1080p / 60 fps, with audio.
 - Plug and play: all libraries and GStreamer plugins are bundled. No MSYS2, GStreamer or Bonjour install needed.
 - **YouTube from the iPhone app:** tap the AirPlay icon in the YouTube app and the video plays on the PC in up to 1440p, with full remote control from the phone: play/pause, seeking, playback speed, volume and switching to another video, all in one window. Original audio track by default, subtitles when selected on the phone. Playback is done by the bundled [mpv](https://mpv.io/).
+- **Updates from inside the app:** when a new release is published, a green *Update vX.Y.Z* button appears in the window's title bar. One click downloads the installer from GitHub, verifies its SHA-256 checksum, updates the app (Windows asks for administrator approval once) and starts it again. Your settings (`uxplayrc`) are kept. Set the environment variable `RUBENCHIK_NO_UPDATE_CHECK=1` to turn the check off.
 - Optional PIN protection: the iPhone must enter a code shown on the PC before mirroring (on by default in the installer).
 - Windows Firewall rule (private networks) and desktop shortcut are set up by the installer; autostart is optional (off by default). The uninstaller removes everything.
 - Open source, built from source by GitHub Actions, based on [UxPlay](https://github.com/FDH2/UxPlay).

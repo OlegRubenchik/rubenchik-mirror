@@ -47,8 +47,19 @@ jobs:
             mingw-w64-ucrt-x86_64-mpv
             mingw-w64-ucrt-x86_64-ntldd
 
+      - name: Determine version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = "${{ inputs.version }}"
+          if (-not $v -and $env:GITHUB_REF -like 'refs/tags/v*') { $v = $env:GITHUB_REF_NAME.TrimStart('v') }
+          if (-not $v) { $v = "0.0.0-dev" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+
       - name: Build UxPlay
         shell: msys2 {0}
+        env:
+          RM_VERSION: ${{ steps.ver.outputs.version }}
         run: |
           git clone "$UXPLAY_REPO" uxplay-src
           git -C uxplay-src checkout "$UXPLAY_REF"
@@ -56,6 +67,9 @@ jobs:
           { grep -rl --include=CMakeLists.txt -e '-march=native' uxplay-src || true; } | xargs -r sed -i 's/-march=native//g'
           # Windows fixes for YouTube (HLS) playback: mpv backend, language fallback, decoder ranking. See patches/.
           git -C uxplay-src apply --verbose "$GITHUB_WORKSPACE"/patches/*.patch
+          # the in-app updater compares this version with the latest GitHub release (0.0.0-dev = never nag)
+          printf '#define RM_VERSION "%s"\n' "$RM_VERSION" > uxplay-src/renderers/rm_version.h
+          cat uxplay-src/renderers/rm_version.h
           cmake -S uxplay-src -B uxplay-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DNO_MARCH_NATIVE=ON
           cmake --build uxplay-build
           ls -la uxplay-build/uxplay.exe
@@ -83,15 +97,6 @@ jobs:
       - name: Remove CI-only tools from bundle
         shell: pwsh
         run: Remove-Item dist/app/bin/gst-inspect-1.0.exe
-
-      - name: Determine version
-        id: ver
-        shell: pwsh
-        run: |
-          $v = "${{ inputs.version }}"
-          if (-not $v -and $env:GITHUB_REF -like 'refs/tags/v*') { $v = $env:GITHUB_REF_NAME.TrimStart('v') }
-          if (-not $v) { $v = "0.0.0-dev" }
-          "version=$v" >> $env:GITHUB_OUTPUT
 
       - name: Install Inno Setup if missing
         shell: pwsh

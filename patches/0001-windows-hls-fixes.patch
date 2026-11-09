@@ -650,12 +650,218 @@ index 0000000..2f08e6d
 +
 +#endif
 +#endif /* MPV_HLS_H */
+diff --git a/renderers/rm_update.h b/renderers/rm_update.h
+new file mode 100644
+index 0000000..fc835c0
+--- /dev/null
++++ b/renderers/rm_update.h
+@@ -0,0 +1,200 @@
++/*
++ * Rubenchik Mirror: in-app updater (Windows only, header-only).
++ *
++ * Every few hours it asks GitHub for the latest release. If it is newer than this build, the window shows an
++ * "Update vX.Y.Z" button. Clicking it downloads RubenchikMirror-Setup.exe from that release, verifies the SHA-256 against the
++ * checksum file published with the release, and starts the installer silently (Windows asks for administrator approval once).
++ * The installer restarts the app when it is done. curl.exe (shipped with Windows 10/11) does the downloads.
++ *
++ * License: GPL-3.0-or-later (same as UxPlay).
++ */
++#ifndef RM_UPDATE_H
++#define RM_UPDATE_H
++
++#ifdef _WIN32
++#include <windows.h>
++#include <shellapi.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <ctype.h>
++
++#ifdef __has_include
++#  if __has_include("rm_version.h")
++#    include "rm_version.h"
++#  endif
++#endif
++#ifndef RM_VERSION
++#  define RM_VERSION "0.0.0-dev"
++#endif
++#define RM_REPO "OlegRubenchik/rubenchik-mirror"
++
++static char rm_upd_tag[40] = "";
++static volatile LONG rm_upd_busy = 0;
++
++/* run a command line without a window and wait for it */
++static bool rm_upd_run(const char *cmd, DWORD timeout_ms) {
++    char line[2048];
++    snprintf(line, sizeof(line), "%s", cmd);
++    STARTUPINFOA si;
++    PROCESS_INFORMATION pi;
++    memset(&si, 0, sizeof(si));
++    si.cb = sizeof(si);
++    memset(&pi, 0, sizeof(pi));
++    if (!CreateProcessA(NULL, line, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) return false;
++    DWORD w = WaitForSingleObject(pi.hProcess, timeout_ms);
++    DWORD code = 1;
++    if (w == WAIT_OBJECT_0) GetExitCodeProcess(pi.hProcess, &code); else TerminateProcess(pi.hProcess, 1);
++    CloseHandle(pi.hThread);
++    CloseHandle(pi.hProcess);
++    return w == WAIT_OBJECT_0 && code == 0;
++}
++
++static bool rm_upd_read(const char *path, char *buf, size_t n) {
++    FILE *f = fopen(path, "rb");
++    if (!f) return false;
++    size_t r = fread(buf, 1, n - 1, f);
++    buf[r] = '\0';
++    fclose(f);
++    return r > 0;
++}
++
++static bool rm_upd_download(const char *url, const char *out) {
++    char cmd[1536];
++    snprintf(cmd, sizeof(cmd),
++             "curl.exe -sSL --fail --max-time 600 -H \"User-Agent: RubenchikMirror-updater\" -o \"%s\" \"%s\"", out, url);
++    return rm_upd_run(cmd, 620000);
++}
++
++static void rm_upd_parse(const char *s, int v[3]) {
++    v[0] = v[1] = v[2] = 0;
++    if (*s == 'v' || *s == 'V') s++;
++    sscanf(s, "%d.%d.%d", &v[0], &v[1], &v[2]);
++}
++
++static bool rm_upd_is_newer(const char *tag) {
++    int a[3], b[3];
++    rm_upd_parse(tag, a);
++    rm_upd_parse(RM_VERSION, b);
++    if (b[0] == 0 && b[1] == 0 && b[2] == 0) return false;   /* development build: never nag */
++    for (int i = 0; i < 3; i++) {
++        if (a[i] != b[i]) return a[i] > b[i];
++    }
++    return false;
++}
++
++static void rm_upd_check_once(void) {
++    char tmp[MAX_PATH], file[MAX_PATH + 40], url[256], buf[16384];
++    if (!GetTempPathA(sizeof(tmp), tmp)) return;
++    snprintf(file, sizeof(file), "%srubenchik-latest.json", tmp);
++    snprintf(url, sizeof(url), "https://api.github.com/repos/%s/releases/latest", RM_REPO);
++    if (!rm_upd_download(url, file)) return;
++    if (!rm_upd_read(file, buf, sizeof(buf))) return;
++    DeleteFileA(file);
++    char *t = strstr(buf, "\"tag_name\"");
++    if (!t) return;
++    t = strchr(t + 10, ':');
++    if (!t) return;
++    t = strchr(t, '"');
++    if (!t) return;
++    t++;
++    char *e = strchr(t, '"');
++    if (!e || e - t >= (int) sizeof(rm_upd_tag)) return;
++    char tag[40];
++    memcpy(tag, t, e - t);
++    tag[e - t] = '\0';
++    if (rm_upd_is_newer(tag)) {
++        snprintf(rm_upd_tag, sizeof(rm_upd_tag), "%s", tag);
++    }
++}
++
++static void rm_upd_click(void);
++
++static DWORD WINAPI rm_upd_checker(LPVOID arg) {
++    (void) arg;
++    Sleep(15000);
++    for (;;) {
++        if (!rm_upd_busy) {
++            rm_upd_check_once();
++            if (rm_upd_tag[0]) {
++                char label[64];
++                snprintf(label, sizeof(label), "Update %s", rm_upd_tag);
++                rm_ui_set_update(label, rm_upd_click);
++            }
++        }
++        Sleep(6 * 3600 * 1000);
++    }
++    return 0;
++}
++
++static DWORD WINAPI rm_upd_installer(LPVOID arg) {
++    (void) arg;
++    char tmp[MAX_PATH], exe[MAX_PATH + 64], sha[MAX_PATH + 64], url[512], url_sha[512];
++    GetTempPathA(sizeof(tmp), tmp);
++    snprintf(exe, sizeof(exe), "%sRubenchikMirror-Setup-%s.exe", tmp, rm_upd_tag);
++    snprintf(sha, sizeof(sha), "%sRubenchikMirror-Setup-%s.sha256", tmp, rm_upd_tag);
++    snprintf(url, sizeof(url), "https://github.com/%s/releases/download/%s/RubenchikMirror-Setup.exe", RM_REPO, rm_upd_tag);
++    snprintf(url_sha, sizeof(url_sha), "https://github.com/%s/releases/download/%s/RubenchikMirror-Setup.exe.sha256", RM_REPO, rm_upd_tag);
++
++    rm_ui_set_update("Downloading...", NULL);
++    if (!rm_upd_download(url, exe) || !rm_upd_download(url_sha, sha)) {
++        rm_ui_set_update("Update failed - retry", rm_upd_click);
++        InterlockedExchange(&rm_upd_busy, 0);
++        return 0;
++    }
++    /* verify SHA-256 with certutil (part of Windows) */
++    char want[200] = "", out[MAX_PATH + 64], cmd[1024], got_txt[2048] = "";
++    rm_upd_read(sha, want, sizeof(want));
++    snprintf(out, sizeof(out), "%shash.txt", tmp);
++    snprintf(cmd, sizeof(cmd), "cmd.exe /c certutil -hashfile \"%s\" SHA256 > \"%s\"", exe, out);
++    bool ok = rm_upd_run(cmd, 120000) && rm_upd_read(out, got_txt, sizeof(got_txt));
++    DeleteFileA(out);
++    if (ok) {
++        /* second line of certutil output is the hash (spaces allowed between bytes on old systems) */
++        char *nl = strchr(got_txt, '\n');
++        char hash[80] = "";
++        if (nl) {
++            int j = 0;
++            for (char *p = nl + 1; *p && *p != '\n' && j < 70; p++) {
++                if (isxdigit((unsigned char) *p)) hash[j++] = (char) tolower((unsigned char) *p);
++            }
++            hash[j] = '\0';
++        }
++        char wanth[80] = "";
++        int k = 0;
++        for (char *p = want; *p && k < 64 && isxdigit((unsigned char) *p); p++) wanth[k++] = (char) tolower((unsigned char) *p);
++        wanth[k] = '\0';
++        ok = (strlen(hash) == 64 && strcmp(hash, wanth) == 0);
++    }
++    if (!ok) {
++        DeleteFileA(exe);
++        rm_ui_set_update("Checksum mismatch", rm_upd_click);
++        InterlockedExchange(&rm_upd_busy, 0);
++        return 0;
++    }
++    rm_ui_set_update("Installing...", NULL);
++    /* run elevated (UAC prompt); the installer stops this app, updates it and starts it again */
++    HINSTANCE r = ShellExecuteA(NULL, "runas", exe, "/SILENT /NORESTART /SUPPRESSMSGBOXES", NULL, SW_SHOWNORMAL);
++    if ((INT_PTR) r <= 32) {
++        rm_ui_set_update("Update cancelled - retry", rm_upd_click);
++        InterlockedExchange(&rm_upd_busy, 0);
++    }
++    return 0;
++}
++
++static void rm_upd_click(void) {
++    if (!rm_upd_tag[0] || InterlockedExchange(&rm_upd_busy, 1)) return;
++    HANDLE th = CreateThread(NULL, 0, rm_upd_installer, NULL, 0, NULL);
++    if (th) CloseHandle(th); else InterlockedExchange(&rm_upd_busy, 0);
++}
++
++static void rm_update_start(void) {
++    if (getenv("RUBENCHIK_NO_UPDATE_CHECK")) return;
++    HANDLE th = CreateThread(NULL, 0, rm_upd_checker, NULL, 0, NULL);
++    if (th) CloseHandle(th);
++}
++
++#else
++static void rm_update_start(void) {}
++#endif
++#endif /* RM_UPDATE_H */
 diff --git a/renderers/rm_window.h b/renderers/rm_window.h
 new file mode 100644
-index 0000000..e5404cf
+index 0000000..a680df7
 --- /dev/null
 +++ b/renderers/rm_window.h
-@@ -0,0 +1,462 @@
+@@ -0,0 +1,509 @@
 +/*
 + * Rubenchik Mirror: branded host window (Windows only, header-only).
 + *
@@ -711,8 +917,32 @@ index 0000000..e5404cf
 +static HANDLE rm_ready_event = NULL;
 +static char rm_logo_path[MAX_PATH + 32];
 +static char rm_icon_path[MAX_PATH + 32];
++static char rm_update_label[64] = "";      /* text of the "update available" button; empty = no button */
++static void (*rm_update_cb)(void) = NULL;  /* called when the button is clicked (NULL: busy, not clickable) */
++static int rm_update_w = 0;                /* button width, measured when painting */
 +
 +static int rm_title_h(void) { return rm_is_fullscreen ? 0 : RM_TITLE_H; }
++
++static void rm_ui_set_update(const char *label, void (*cb)(void)) {
++    snprintf(rm_update_label, sizeof(rm_update_label), "%s", label ? label : "");
++    rm_update_cb = cb;
++    if (rm_host) InvalidateRect(rm_host, NULL, FALSE);
++}
++
++static RECT rm_update_rect(int width) {
++    RECT r;
++    r.right = width - 3 * RM_BTN_W - 12;
++    r.left = r.right - rm_update_w;
++    r.top = 7;
++    r.bottom = RM_TITLE_H - 7;
++    return r;
++}
++
++static bool rm_in_update(int x, int y, int width) {
++    if (rm_is_fullscreen || !rm_update_label[0] || rm_update_w <= 0) return false;
++    RECT r = rm_update_rect(width);
++    return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
++}
 +
 +static void rm_layout(void) {
 +    if (!rm_host || !rm_video) return;
@@ -809,6 +1039,24 @@ index 0000000..e5404cf
 +        SelectObject(dc, rm_font_small);
 +        SetTextColor(dc, rm_state_now > 0 ? RM_COL_GREEN : RM_COL_MUTED);
 +        TextOutA(dc, 42 + sz.cx + 14, (th - 16) / 2 + 1, status, (int) strlen(status));
++        if (rm_update_label[0]) {
++            SelectObject(dc, rm_font_small);
++            SIZE us;
++            GetTextExtentPoint32A(dc, rm_update_label, (int) strlen(rm_update_label), &us);
++            rm_update_w = us.cx + 28;
++            RECT ur = rm_update_rect(cr.right);
++            HBRUSH gb = CreateSolidBrush(rm_update_cb ? RM_COL_GREEN : RM_COL_HOVER);
++            HPEN gp = CreatePen(PS_SOLID, 1, rm_update_cb ? RM_COL_GREEN : RM_COL_HOVER);
++            HBRUSH ogb = (HBRUSH) SelectObject(dc, gb);
++            HPEN ogp = (HPEN) SelectObject(dc, gp);
++            RoundRect(dc, ur.left, ur.top, ur.right, ur.bottom, 12, 12);
++            SelectObject(dc, ogb);
++            SelectObject(dc, ogp);
++            DeleteObject(gb);
++            DeleteObject(gp);
++            SetTextColor(dc, rm_update_cb ? RM_COL_BG : RM_COL_TEXT);
++            TextOutA(dc, ur.left + 14, ur.top + ((ur.bottom - ur.top) - us.cy) / 2, rm_update_label, (int) strlen(rm_update_label));
++        }
 +        for (int i = 1; i <= 3; i++) {
 +            RECT r = rm_button_rect(i, cr.right);
 +            if (rm_hover == i) {
@@ -889,7 +1137,7 @@ index 0000000..e5404cf
 +            if (r) return HTRIGHT;
 +            if (t) return HTTOP;
 +            if (b) return HTBOTTOM;
-+            if (pt.y < RM_TITLE_H && rm_button_at(pt.x, pt.y, cr.right) == 0) return HTCAPTION;
++            if (pt.y < RM_TITLE_H && rm_button_at(pt.x, pt.y, cr.right) == 0 && !rm_in_update(pt.x, pt.y, cr.right)) return HTCAPTION;
 +        }
 +        return HTCLIENT;
 +    }
@@ -938,6 +1186,10 @@ index 0000000..e5404cf
 +    case WM_LBUTTONUP: {
 +        RECT cr;
 +        GetClientRect(hwnd, &cr);
++        if (rm_in_update(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), cr.right)) {
++            if (rm_update_cb) rm_update_cb();
++            return 0;
++        }
 +        switch (rm_button_at(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), cr.right)) {
 +        case 1: ShowWindow(hwnd, SW_MINIMIZE); break;
 +        case 2: rm_set_fullscreen(!rm_is_fullscreen); break;
@@ -1115,23 +1367,25 @@ index 0000000..e5404cf
 +typedef void (*rm_close_fn)(void);
 +static bool rm_ui_start(const char *a, const char *b, rm_state_fn c, rm_close_fn d, bool e) { (void) a; (void) b; (void) c; (void) d; (void) e; return false; }
 +static uintptr_t rm_ui_video_handle(void) { return 0; }
++static void rm_ui_set_update(const char *label, void (*cb)(void)) { (void) label; (void) cb; }
 +
 +#endif
 +#endif /* RM_WINDOW_H */
 diff --git a/renderers/video_renderer.c b/renderers/video_renderer.c
-index b6c1f1c..a4d045f 100644
+index b6c1f1c..67b0717 100644
 --- a/renderers/video_renderer.c
 +++ b/renderers/video_renderer.c
-@@ -23,6 +23,8 @@
+@@ -23,6 +23,9 @@
  #include <gst/gst.h>
  #include <gst/app/gstappsrc.h>
  #include "video_renderer.h"
 +#include "mpv_hls.h"
 +#include "rm_window.h"
++#include "rm_update.h"
  #include <gst/video/videooverlay.h>
  
  static uintptr_t external_window_handle = 0;
-@@ -61,6 +63,15 @@ static logger_t *logger = NULL;
+@@ -61,6 +64,15 @@ static logger_t *logger = NULL;
  static bool first_packet = false;
  static bool sync = false;
  static bool hls_video = false;
@@ -1147,7 +1401,7 @@ index b6c1f1c..a4d045f 100644
  #ifdef X_DISPLAY_FIX
  static bool use_x11 = false;
  #endif
-@@ -271,6 +282,12 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
+@@ -271,6 +283,12 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
      GstCaps *caps = NULL;
      bool rtp = (bool) strlen(rtp_pipeline);
      hls_video = (uri != NULL);
@@ -1160,7 +1414,7 @@ index b6c1f1c..a4d045f 100644
      /* videosink choices that are auto */
      bool auto_videosink = (strstr(videosink, "autovideosink") || strstr(videosink, "fpsdisplaysink"));
  
-@@ -503,6 +520,10 @@ void video_renderer_pause() {
+@@ -503,6 +521,10 @@ void video_renderer_pause() {
      if (!renderer) {
          return;
      }
@@ -1171,7 +1425,7 @@ index b6c1f1c..a4d045f 100644
      GstStateChangeReturn ret = gst_element_set_state(renderer->pipeline, GST_STATE_PAUSED);
      logger_log(logger, LOGGER_DEBUG, "video renderer pause: %s", gst_element_state_change_return_get_name(ret));
  }
-@@ -511,6 +532,10 @@ void video_renderer_resume() {
+@@ -511,6 +533,10 @@ void video_renderer_resume() {
      if (!renderer) {
          return;
      }
@@ -1182,7 +1436,7 @@ index b6c1f1c..a4d045f 100644
      gst_element_set_state (renderer->pipeline, GST_STATE_PLAYING);
      GstState state;
      /* wait with timeout 100 msec for pipeline to change state from PAUSED to PLAYING */
-@@ -525,6 +550,21 @@ void video_renderer_resume() {
+@@ -525,6 +551,21 @@ void video_renderer_resume() {
  void video_renderer_start() {
      GstState state;
      const gchar *state_name = NULL;
@@ -1204,7 +1458,7 @@ index b6c1f1c..a4d045f 100644
      if (hls_video) {
          g_object_set (G_OBJECT (renderer->pipeline), "uri", renderer->uri, NULL);
          gst_element_set_state (renderer->pipeline, GST_STATE_PAUSED);
-@@ -624,6 +664,9 @@ void video_renderer_display_jpeg(const void *data, int *data_len) {
+@@ -624,6 +665,9 @@ void video_renderer_display_jpeg(const void *data, int *data_len) {
  }
  
  uint64_t video_renderer_render_buffer(unsigned char* data, int *data_len, int *nal_count, uint64_t *ntp_time) {
@@ -1214,7 +1468,7 @@ index b6c1f1c..a4d045f 100644
      GstBuffer *buffer = NULL;
      GstClockTime pts = (GstClockTime) *ntp_time; /*now in nsecs */
      //GstClockTimeDiff latency = GST_CLOCK_DIFF(gst_element_get_current_clock_time (renderer->appsrc), pts);
-@@ -684,6 +727,11 @@ void video_renderer_flush() {
+@@ -684,6 +728,11 @@ void video_renderer_flush() {
  void video_renderer_hls_ready() {
      GstState state;
      GstStateChangeReturn ret;
@@ -1226,7 +1480,7 @@ index b6c1f1c..a4d045f 100644
      if (renderer && hls_video) {
          logger_log(logger, LOGGER_DEBUG,"video_renderer_hls_ready");
          ret = gst_element_set_state (renderer->pipeline, GST_STATE_READY);
-@@ -695,6 +743,11 @@ void video_renderer_hls_ready() {
+@@ -695,6 +744,11 @@ void video_renderer_hls_ready() {
  }
  
  void video_renderer_stop() {
@@ -1238,7 +1492,7 @@ index b6c1f1c..a4d045f 100644
      if (renderer) {
          logger_log(logger, LOGGER_DEBUG,"video_renderer_stop");
          if (renderer->appsrc) {
-@@ -735,6 +788,11 @@ void video_renderer_set_track_metadata(const char *title, const char *artist, co
+@@ -735,6 +789,11 @@ void video_renderer_set_track_metadata(const char *title, const char *artist, co
  
  static void video_renderer_destroy_instance(video_renderer_t *renderer) {
      if (renderer) {
@@ -1250,7 +1504,7 @@ index b6c1f1c..a4d045f 100644
          logger_log(logger, LOGGER_DEBUG,"destroying renderer instance %p codec=%s ", renderer, renderer->codec);
          GstState state;
          GstStateChangeReturn ret;
-@@ -825,7 +883,7 @@ static void hls_video_seek_to_start_position(GstElement *pipeline) {
+@@ -825,7 +884,7 @@ static void hls_video_seek_to_start_position(GstElement *pipeline) {
          && hls_requested_start_position  <= hls_seek_end) {
          g_print("***************** seek to hls_requested_start_position %" GST_TIME_FORMAT "\n", GST_TIME_ARGS(hls_requested_start_position));
          if (gst_element_seek_simple (pipeline, GST_FORMAT_TIME,
@@ -1259,7 +1513,7 @@ index b6c1f1c..a4d045f 100644
                                       hls_requested_start_position)) {
              hls_requested_start_position = 0;
          } else {
-@@ -1069,7 +1127,11 @@ static gboolean gstreamer_video_pipeline_bus_callback(GstBus *bus, GstMessage *m
+@@ -1069,7 +1128,11 @@ static gboolean gstreamer_video_pipeline_bus_callback(GstBus *bus, GstMessage *m
  
  int video_renderer_choose_codec_and_size (bool video_is_jpeg, bool video_is_h265, video_geometry_t *video_geometry) {
      video_renderer_t *renderer_used = NULL;
@@ -1272,7 +1526,7 @@ index b6c1f1c..a4d045f 100644
      if (video_is_jpeg) {
          g_assert(type_jpeg != -1);
          renderer_used = renderer_type[type_jpeg];
-@@ -1116,6 +1178,8 @@ int video_renderer_choose_codec_and_size (bool video_is_jpeg, bool video_is_h265
+@@ -1116,6 +1179,8 @@ int video_renderer_choose_codec_and_size (bool video_is_jpeg, bool video_is_h265
                 gst_element_state_get_name (old_state),gst_element_state_get_name (new_state));
      gst_video_pipeline_base_time = gst_element_get_base_time(renderer->appsrc);
  
@@ -1281,7 +1535,7 @@ index b6c1f1c..a4d045f 100644
      /* destroy unused renderers */
      for (int i = 0; i < n_renderers; i++) {
          if (renderer_type[i] == renderer) {
-@@ -1143,6 +1207,25 @@ bool video_get_playback_info(double *duration, double *position, double *seek_st
+@@ -1143,6 +1208,25 @@ bool video_get_playback_info(double *duration, double *position, double *seek_st
          return true;
      }
  
@@ -1307,7 +1561,7 @@ index b6c1f1c..a4d045f 100644
      if (hls_seek_enabled) {
          *seek_start = ((double) hls_seek_start) / GST_SECOND;
          *seek_duration = ((double) (hls_seek_end - hls_seek_start)) / GST_SECOND;     
-@@ -1185,6 +1268,10 @@ void video_renderer_set_start(float position) {
+@@ -1185,6 +1269,10 @@ void video_renderer_set_start(float position) {
  }
  
  void video_renderer_seek(float position) {
@@ -1318,7 +1572,7 @@ index b6c1f1c..a4d045f 100644
       gint64 seek_position = (gint64) ((double) position * GST_SECOND);
      /* don't seek to within 1  microsecond  of beginning or end of video */
      if (!renderer || hls_duration < 2000) return;
-@@ -1193,7 +1280,7 @@ void video_renderer_seek(float position) {
+@@ -1193,7 +1281,7 @@ void video_renderer_seek(float position) {
      g_print("SCRUB: seek to %f secs =  %" GST_TIME_FORMAT ", duration = %" GST_TIME_FORMAT "\n", position,
              GST_TIME_ARGS(seek_position),  GST_TIME_ARGS(hls_duration));
      gboolean result = gst_element_seek_simple(renderer->pipeline, GST_FORMAT_TIME,
@@ -1327,7 +1581,7 @@ index b6c1f1c..a4d045f 100644
                                                seek_position);
      if (result) {
          g_print("seek succeeded\n");
-@@ -1218,6 +1305,53 @@ bool video_renderer_eos_watch() {
+@@ -1218,6 +1306,54 @@ bool video_renderer_eos_watch() {
      return false; 
  }
  
@@ -1354,6 +1608,7 @@ index b6c1f1c..a4d045f 100644
 +    if (!rm_ui_start(logo, icon, rm_ui_state, on_close, start_fullscreen)) return false;
 +    video_renderer_set_window_handle(rm_ui_video_handle());
 +    mpv_hls_set_wid(rm_ui_video_handle());
++    rm_update_start();
 +    return true;
 +#else
 +    (void) start_fullscreen; (void) on_close;
@@ -1381,7 +1636,7 @@ index b6c1f1c..a4d045f 100644
  void video_renderer_hls_set_volume(double volume) {
      if (!renderer || strcmp(renderer->codec, hls)) {
         return;
-@@ -1225,6 +1359,10 @@ void video_renderer_hls_set_volume(double volume) {
+@@ -1225,6 +1361,10 @@ void video_renderer_hls_set_volume(double volume) {
      volume = (volume > 10.0) ? 10.0 : volume;
      volume = (volume < 0.0) ? 0.0 : volume;
      hls_volume_level = (gdouble) volume;

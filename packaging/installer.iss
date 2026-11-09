@@ -52,8 +52,9 @@ Source: "{#AppDir}\libexec\*"; DestDir: "{app}\libexec"; Flags: ignoreversion re
 Source: "{#AppDir}\share\*"; DestDir: "{app}\share"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#AppDir}\etc\*"; DestDir: "{app}\etc"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "{#AppDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
-Source: "uxplayrc.pin"; DestDir: "{app}"; DestName: "uxplayrc"; Flags: ignoreversion; Tasks: pin
-Source: "uxplayrc"; DestDir: "{app}"; DestName: "uxplayrc"; Flags: ignoreversion; Tasks: not pin
+; the settings file is only written on the first install, so updates keep the user's changes
+Source: "uxplayrc.pin"; DestDir: "{app}"; DestName: "uxplayrc"; Flags: ignoreversion onlyifdoesntexist; Tasks: pin
+Source: "uxplayrc"; DestDir: "{app}"; DestName: "uxplayrc"; Flags: ignoreversion onlyifdoesntexist; Tasks: not pin
 Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\assets\idle-logo.bmp"; DestDir: "{app}\assets"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
@@ -72,6 +73,8 @@ Name: "{commonstartup}\{#AppName}"; Filename: "{app}\{#AppExe}"; Parameters: "-r
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""{#FwRule}"""; Flags: runhidden; StatusMsg: "Configuring Windows Firewall..."
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""{#FwRule}"" dir=in action=allow program=""{app}\{#AppExe}"" enable=yes profile=private"; Flags: runhidden; StatusMsg: "Configuring Windows Firewall..."
 Filename: "{app}\{#AppExe}"; Parameters: "-rc ""{app}\uxplayrc"""; WorkingDir: "{app}\bin"; Description: "Start {#AppName} now"; Flags: nowait postinstall skipifsilent
+; in-app update (installer started with /SILENT): start the app again, as the normal user
+Filename: "{app}\{#AppExe}"; Parameters: "-rc ""{app}\uxplayrc"""; WorkingDir: "{app}\bin"; Flags: nowait runasoriginaluser; Check: RestartAfterUpdate
 
 [UninstallRun]
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""{#FwRule}"""; Flags: runhidden; RunOnceId: "DelFirewallRule"
@@ -92,6 +95,11 @@ function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   StopRunningInstance();
   Result := '';
+end;
+
+function RestartAfterUpdate(): Boolean;
+begin
+  Result := WizardSilent and not WizardVerySilent;
 end;
 
 function InitializeUninstall(): Boolean;
