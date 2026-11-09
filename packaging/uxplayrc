@@ -19,6 +19,10 @@ fps 60
 # (the phone becomes a remote). Without this option only the audio is received.
 hls
 
+# YouTube audio-track preference (colon-separated, in order). Without it UxPlay falls back to
+# "en-US" on Windows and picks the English auto-dubbed track. Change to e.g. "en" if you want English.
+lang ru:en
+
 # Audio is on by default. Uncomment to pick a specific Windows audio sink:
 # as wasapisink
 
