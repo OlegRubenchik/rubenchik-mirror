@@ -97,9 +97,20 @@ begin
   Result := '';
 end;
 
+function HasSwitch(const Name: String): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+    if CompareText(ParamStr(I), Name) = 0 then
+      Result := True;
+end;
+
+{ the in-app updater starts the installer with /SILENT: restart the app afterwards (not for /VERYSILENT, used by CI) }
 function RestartAfterUpdate(): Boolean;
 begin
-  Result := WizardSilent and not WizardVerySilent;
+  Result := WizardSilent and not HasSwitch('/VERYSILENT');
 end;
 
 function InitializeUninstall(): Boolean;
