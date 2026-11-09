@@ -651,10 +651,10 @@ index 0000000..1fd1b03
 +#endif /* MPV_HLS_H */
 diff --git a/renderers/rm_window.h b/renderers/rm_window.h
 new file mode 100644
-index 0000000..f107c2b
+index 0000000..e5404cf
 --- /dev/null
 +++ b/renderers/rm_window.h
-@@ -0,0 +1,445 @@
+@@ -0,0 +1,462 @@
 +/*
 + * Rubenchik Mirror: branded host window (Windows only, header-only).
 + *
@@ -907,6 +907,11 @@ index 0000000..f107c2b
 +    case WM_PAINT:
 +        rm_paint(hwnd);
 +        return 0;
++    case WM_NCACTIVATE:
++        /* lParam -1: do not repaint the (non-existent) frame: avoids the light outline when the window is (de)activated */
++        return DefWindowProc(hwnd, msg, wp, -1);
++    case WM_NCPAINT:
++        return 0;
 +    case WM_MOUSEMOVE: {
 +        RECT cr;
 +        GetClientRect(hwnd, &cr);
@@ -1047,6 +1052,18 @@ index 0000000..f107c2b
 +                              (sw - w) / 2, (sh - h) / 2, w, h, NULL, NULL, inst, NULL);
 +    rm_video = CreateWindowExA(0, "RubenchikMirrorVideo", "", WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
 +                               0, RM_TITLE_H, w, h - RM_TITLE_H, rm_host, NULL, inst, NULL);
++    /* Windows 11: remove the thin DWM border around the window (DWMWA_BORDER_COLOR = 34, DWMWA_COLOR_NONE) */
++    {
++        HMODULE dwm = LoadLibraryA("dwmapi.dll");
++        if (dwm) {
++            typedef HRESULT (WINAPI *dwm_set_fn)(HWND, DWORD, LPCVOID, DWORD);
++            dwm_set_fn set_attr = (dwm_set_fn) GetProcAddress(dwm, "DwmSetWindowAttribute");
++            if (set_attr) {
++                DWORD none = 0xFFFFFFFE;
++                set_attr(rm_host, 34, &none, sizeof(none));
++            }
++        }
++    }
 +    rm_layout();
 +    ShowWindow(rm_host, SW_SHOW);
 +    UpdateWindow(rm_host);
