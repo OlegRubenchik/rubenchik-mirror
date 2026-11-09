@@ -232,10 +232,10 @@ index dd9c774..71d1cfa 100644
  
 diff --git a/renderers/mpv_hls.h b/renderers/mpv_hls.h
 new file mode 100644
-index 0000000..15940eb
+index 0000000..1fd1b03
 --- /dev/null
 +++ b/renderers/mpv_hls.h
-@@ -0,0 +1,405 @@
+@@ -0,0 +1,413 @@
 +/*
 + * Rubenchik Mirror: optional mpv backend for AirPlay HLS (YouTube) playback on Windows.
 + *
@@ -270,6 +270,8 @@ index 0000000..15940eb
 +static int mpv_req_id = 0;
 +static DWORD mpv_idle_since = 0;   /* tick count when playback stopped; 0 = playing */
 +static uintptr_t mpv_wid = 0;      /* host window to embed mpv into (0: mpv opens its own window) */
++static DWORD mpv_load_tick = 0;    /* when the last loadfile command was sent */
++static bool mpv_seen_file = false; /* mpv has started working on the file (is no longer idle) since loadfile */
 +
 +static void mpv_hls_set_wid(uintptr_t wid) { mpv_wid = wid; }
 +
@@ -503,6 +505,8 @@ index 0000000..15940eb
 +    bool ok = mpv_hls_cmd(cmd, reply, sizeof(reply)) && strstr(reply, "\"error\":\"success\"");
 +    if (ok) {
 +        mpv_idle_since = 0;
++        mpv_load_tick = GetTickCount();
++        mpv_seen_file = false;
 +        mpv_hls_cmd("[\"set_property\",\"speed\",1.0]", NULL, 0);
 +    }
 +    mpv_hls_unlock();
@@ -610,7 +614,11 @@ index 0000000..15940eb
 +    bool alive = mpv_hls_alive() && mpv_pipe != INVALID_HANDLE_VALUE;
 +    if (alive) {
 +        bool idle = false;
-+        if (mpv_hls_get_bool("idle-active", &idle) && idle) {
++        bool got_idle = mpv_hls_get_bool("idle-active", &idle);
++        if (got_idle && !idle) mpv_seen_file = true;
++        if (got_idle && idle && !mpv_seen_file && (GetTickCount() - mpv_load_tick) < 30000) {
++            /* the loadfile command has not been processed yet / the stream is still being opened: not "finished" */
++        } else if (got_idle && idle) {
 +            alive = false;
 +        } else {
 +            double d = 0, p = -1;
@@ -1087,7 +1095,7 @@ index 0000000..70019ce
 +#endif
 +#endif /* RM_WINDOW_H */
 diff --git a/renderers/video_renderer.c b/renderers/video_renderer.c
-index b6c1f1c..1d345da 100644
+index b6c1f1c..a4d045f 100644
 --- a/renderers/video_renderer.c
 +++ b/renderers/video_renderer.c
 @@ -23,6 +23,8 @@
@@ -1172,7 +1180,17 @@ index b6c1f1c..1d345da 100644
      if (hls_video) {
          g_object_set (G_OBJECT (renderer->pipeline), "uri", renderer->uri, NULL);
          gst_element_set_state (renderer->pipeline, GST_STATE_PAUSED);
-@@ -684,6 +724,11 @@ void video_renderer_flush() {
+@@ -624,6 +664,9 @@ void video_renderer_display_jpeg(const void *data, int *data_len) {
+ }
+ 
+ uint64_t video_renderer_render_buffer(unsigned char* data, int *data_len, int *nal_count, uint64_t *ntp_time) {
++    if (hls_video || !renderer || !renderer->appsrc) {
++        return 0;    /* Rubenchik Mirror: no mirror pipeline (HLS video is playing): drop the data */
++    }
+     GstBuffer *buffer = NULL;
+     GstClockTime pts = (GstClockTime) *ntp_time; /*now in nsecs */
+     //GstClockTimeDiff latency = GST_CLOCK_DIFF(gst_element_get_current_clock_time (renderer->appsrc), pts);
+@@ -684,6 +727,11 @@ void video_renderer_flush() {
  void video_renderer_hls_ready() {
      GstState state;
      GstStateChangeReturn ret;
@@ -1184,7 +1202,7 @@ index b6c1f1c..1d345da 100644
      if (renderer && hls_video) {
          logger_log(logger, LOGGER_DEBUG,"video_renderer_hls_ready");
          ret = gst_element_set_state (renderer->pipeline, GST_STATE_READY);
-@@ -695,6 +740,11 @@ void video_renderer_hls_ready() {
+@@ -695,6 +743,11 @@ void video_renderer_hls_ready() {
  }
  
  void video_renderer_stop() {
@@ -1196,7 +1214,7 @@ index b6c1f1c..1d345da 100644
      if (renderer) {
          logger_log(logger, LOGGER_DEBUG,"video_renderer_stop");
          if (renderer->appsrc) {
-@@ -735,6 +785,11 @@ void video_renderer_set_track_metadata(const char *title, const char *artist, co
+@@ -735,6 +788,11 @@ void video_renderer_set_track_metadata(const char *title, const char *artist, co
  
  static void video_renderer_destroy_instance(video_renderer_t *renderer) {
      if (renderer) {
@@ -1208,7 +1226,7 @@ index b6c1f1c..1d345da 100644
          logger_log(logger, LOGGER_DEBUG,"destroying renderer instance %p codec=%s ", renderer, renderer->codec);
          GstState state;
          GstStateChangeReturn ret;
-@@ -825,7 +880,7 @@ static void hls_video_seek_to_start_position(GstElement *pipeline) {
+@@ -825,7 +883,7 @@ static void hls_video_seek_to_start_position(GstElement *pipeline) {
          && hls_requested_start_position  <= hls_seek_end) {
          g_print("***************** seek to hls_requested_start_position %" GST_TIME_FORMAT "\n", GST_TIME_ARGS(hls_requested_start_position));
          if (gst_element_seek_simple (pipeline, GST_FORMAT_TIME,
@@ -1217,7 +1235,20 @@ index b6c1f1c..1d345da 100644
                                       hls_requested_start_position)) {
              hls_requested_start_position = 0;
          } else {
-@@ -1116,6 +1171,8 @@ int video_renderer_choose_codec_and_size (bool video_is_jpeg, bool video_is_h265
+@@ -1069,7 +1127,11 @@ static gboolean gstreamer_video_pipeline_bus_callback(GstBus *bus, GstMessage *m
+ 
+ int video_renderer_choose_codec_and_size (bool video_is_jpeg, bool video_is_h265, video_geometry_t *video_geometry) {
+     video_renderer_t *renderer_used = NULL;
+-    g_assert(!hls_video);
++    if (hls_video) {
++        /* Rubenchik Mirror: the iPhone may still send screen-mirroring packets while YouTube (HLS) video is playing: ignore them instead of aborting */
++        logger_log(logger, LOGGER_INFO, "ignoring screen-mirroring stream while HLS video is playing");
++        return 0;
++    }
+     if (video_is_jpeg) {
+         g_assert(type_jpeg != -1);
+         renderer_used = renderer_type[type_jpeg];
+@@ -1116,6 +1178,8 @@ int video_renderer_choose_codec_and_size (bool video_is_jpeg, bool video_is_h265
                 gst_element_state_get_name (old_state),gst_element_state_get_name (new_state));
      gst_video_pipeline_base_time = gst_element_get_base_time(renderer->appsrc);
  
@@ -1226,7 +1257,7 @@ index b6c1f1c..1d345da 100644
      /* destroy unused renderers */
      for (int i = 0; i < n_renderers; i++) {
          if (renderer_type[i] == renderer) {
-@@ -1143,6 +1200,25 @@ bool video_get_playback_info(double *duration, double *position, double *seek_st
+@@ -1143,6 +1207,25 @@ bool video_get_playback_info(double *duration, double *position, double *seek_st
          return true;
      }
  
@@ -1252,7 +1283,7 @@ index b6c1f1c..1d345da 100644
      if (hls_seek_enabled) {
          *seek_start = ((double) hls_seek_start) / GST_SECOND;
          *seek_duration = ((double) (hls_seek_end - hls_seek_start)) / GST_SECOND;     
-@@ -1185,6 +1261,10 @@ void video_renderer_set_start(float position) {
+@@ -1185,6 +1268,10 @@ void video_renderer_set_start(float position) {
  }
  
  void video_renderer_seek(float position) {
@@ -1263,7 +1294,7 @@ index b6c1f1c..1d345da 100644
       gint64 seek_position = (gint64) ((double) position * GST_SECOND);
      /* don't seek to within 1  microsecond  of beginning or end of video */
      if (!renderer || hls_duration < 2000) return;
-@@ -1193,7 +1273,7 @@ void video_renderer_seek(float position) {
+@@ -1193,7 +1280,7 @@ void video_renderer_seek(float position) {
      g_print("SCRUB: seek to %f secs =  %" GST_TIME_FORMAT ", duration = %" GST_TIME_FORMAT "\n", position,
              GST_TIME_ARGS(seek_position),  GST_TIME_ARGS(hls_duration));
      gboolean result = gst_element_seek_simple(renderer->pipeline, GST_FORMAT_TIME,
@@ -1272,7 +1303,7 @@ index b6c1f1c..1d345da 100644
                                                seek_position);
      if (result) {
          g_print("seek succeeded\n");
-@@ -1218,6 +1298,53 @@ bool video_renderer_eos_watch() {
+@@ -1218,6 +1305,53 @@ bool video_renderer_eos_watch() {
      return false; 
  }
  
@@ -1326,7 +1357,7 @@ index b6c1f1c..1d345da 100644
  void video_renderer_hls_set_volume(double volume) {
      if (!renderer || strcmp(renderer->codec, hls)) {
         return;
-@@ -1225,6 +1352,10 @@ void video_renderer_hls_set_volume(double volume) {
+@@ -1225,6 +1359,10 @@ void video_renderer_hls_set_volume(double volume) {
      volume = (volume > 10.0) ? 10.0 : volume;
      volume = (volume < 0.0) ? 0.0 : volume;
      hls_volume_level = (gdouble) volume;
@@ -1352,7 +1383,7 @@ index 4a6e012..567164a 100644
  bool gstreamer_decoder_check(const char *decoder);
  #ifdef __cplusplus
 diff --git a/uxplay.cpp b/uxplay.cpp
-index 5ad4e39..9c5d7ce 100644
+index 5ad4e39..d83a59a 100644
 --- a/uxplay.cpp
 +++ b/uxplay.cpp
 @@ -73,6 +73,9 @@
@@ -1460,3 +1491,21 @@ index 5ad4e39..9c5d7ce 100644
      if (fullscreen && use_video) {
          if (videosink == "waylandsink" || videosink == "vaapisink") {
              videosink_options.append(" fullscreen=true");
+@@ -3787,6 +3833,17 @@ int main (int argc, char *argv[]) {
+                                 video_decoder.c_str(), video_converter.c_str(), videosink.c_str(),
+                                 videosink_options.c_str(), fullscreen, video_sync, h265_support,
+                                 render_coverart, playbin_version, uri);
++            if (!uri && !url.empty()) {
++                /* Rubenchik Mirror: on_video_play() arrived while the renderer was being rebuilt; main_loop() resets its
++                   flags when it starts, so that request would be lost (screen mirroring -> YouTube never started).
++                   Rebuild once more, now for the HLS video. */
++                LOGI("HLS video requested while the video renderer was being rebuilt: rebuilding for HLS");
++                video_renderer_destroy();
++                video_renderer_init(render_logger, server_name.c_str(), videoflip, video_parser.c_str(),rtp_pipeline.c_str(),
++                                    video_decoder.c_str(), video_converter.c_str(), videosink.c_str(),
++                                    videosink_options.c_str(), fullscreen, video_sync, h265_support,
++                                    render_coverart, playbin_version, url.c_str());
++            }
+             full_video_reset = false;
+             video_renderer_start();
+         }
