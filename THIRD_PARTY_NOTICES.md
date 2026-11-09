@@ -15,6 +15,7 @@ folder next to the application.
 | RPiPlay, Shairplay, playfair and other code included in UxPlay | AirPlay protocol implementation | GPL-3.0 / LGPL-2.1, as stated in the UxPlay source tree |
 | [GStreamer](https://gstreamer.freedesktop.org/) core, base, good and bad plugins | Video/audio decoding and rendering (Direct3D 11, WASAPI) | LGPL-2.1-or-later |
 | [FFmpeg / libav](https://ffmpeg.org/) via `gst-libav` | H.264 and AAC/ALAC decoding | LGPL-2.1-or-later (as built by MSYS2) |
+| [mpv](https://mpv.io/) (and its libraries: FFmpeg, libass, libplacebo, ...) | Plays YouTube / HLS video sent by the iPhone (`mpv.exe`, controlled by `uxplay.exe` over mpv's IPC pipe) | GPL-2.0-or-later (as built by MSYS2; compatible with GPL-3.0) |
 | [libplist](https://github.com/libimobiledevice/libplist) | Apple property-list parsing | LGPL-2.1-or-later |
 | [OpenSSL](https://www.openssl.org/) 3.x | Cryptography. CI verifies the build links against OpenSSL 3.0.0 or later, as UxPlay requires for GPL compliance | Apache-2.0 |
 | UxPlay's internal mDNS responder (`lib/mdnsd`, by Juho Vähä-Herttua, kgbook and FDH2) | Service discovery, so that the iPhone can find the receiver. Apple's Bonjour / mDNSResponder (Apache-2.0) is **not** used or bundled | LGPL-2.1-or-later |

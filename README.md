@@ -21,6 +21,7 @@
 - Shows up as **"Rubenchik Mirror"** in the iPhone / iPad *Screen Mirroring* list. No app needed on the phone.
 - Fullscreen, hardware-accelerated (Direct3D 11) video at up to 1080p / 60 fps, with audio.
 - Plug and play: all libraries and GStreamer plugins are bundled. No MSYS2, GStreamer or Bonjour install needed.
+- **YouTube from the iPhone app:** tap the AirPlay icon in the YouTube app and the video plays on the PC in up to 1440p, with full remote control from the phone: play/pause, seeking, playback speed, volume and switching to another video, all in one window. Original audio track by default, subtitles when selected on the phone. Playback is done by the bundled [mpv](https://mpv.io/).
 - Optional PIN protection: the iPhone must enter a code shown on the PC before mirroring (on by default in the installer).
 - Windows Firewall rule (private networks) and desktop shortcut are set up by the installer; autostart is optional (off by default). The uninstaller removes everything.
 - Open source, built from source by GitHub Actions, based on [UxPlay](https://github.com/FDH2/UxPlay).
@@ -42,6 +43,8 @@
 On the iPhone: open **Control Center → Screen Mirroring → Rubenchik Mirror**. The screen appears fullscreen on the PC. Press **Alt+Enter** to toggle fullscreen, close the window or stop the app to disconnect.
 
 **PIN:** the first time an iPhone connects, a 4-digit code appears on the PC screen (and in the console window) and the iPhone asks for it. After you enter it once, the iPhone remembers this PC. To change this later, add or remove the line `pin` in `uxplayrc` (use `pw yourpassword`, at least 6 characters, instead for a fixed password). Note that PIN protection stops casual use by other devices on your network but does not encrypt anything beyond what AirPlay already does.
+
+**YouTube:** open a video in the YouTube iPhone app, tap the AirPlay/cast icon and choose *Rubenchik Mirror*. The video opens in an mpv window on the PC (keyboard: `f` fullscreen, space pause, `#` next audio track, `v` toggle subtitles). The window closes a few seconds after you stop playback. The `hls` line in `uxplayrc` enables this; set the environment variable `RUBENCHIK_NO_MPV=1` to use the built-in GStreamer player instead.
 
 To mirror to a TV, connect the laptop by HDMI and make the TV the main display (Win+P → *Duplicate* or *Second screen only*).
 

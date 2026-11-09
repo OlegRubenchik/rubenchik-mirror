@@ -1,0 +1,938 @@
+diff --git a/lib/airplay_video.c b/lib/airplay_video.c
+index e4406cb..9bfb381 100644
+--- a/lib/airplay_video.c
++++ b/lib/airplay_video.c
+@@ -18,6 +18,9 @@
+ // otherwise participating in them.  
+ 
+ #include <stdlib.h>
++#ifdef _WIN32
++#include "../renderers/mpv_hls.h"
++#endif
+ #include <stdio.h>
+ #include <string.h>
+ #include <stdbool.h>
+@@ -735,8 +738,142 @@ static slice_t *master_playlist_slicer(const char *master_playlist, airplay_vide
+     return slice;
+ }
+ 
++/* Rubenchik Mirror: YouTube master playlists mix H.264 (avc1) and VP9 (vp09) variants. GStreamer's hlsdemux2 cannot
++   switch between the two codecs mid-stream (playback freezes), so if H.264 variants exist, drop all other-codec
++   variants (each #EXT-X-STREAM-INF line plus the URI line that follows it). Edits the string in place. */
++static void keep_only_h264_variants(char *playlist) {
++    if (!playlist || !strstr(playlist, "CODECS=\"avc1")) {
++        return;
++    }
++    char *src = playlist;
++    char *dst = playlist;
++    while (*src) {
++        char *eol = strchr(src, '\n');
++        size_t len = eol ? (size_t) (eol - src) + 1 : strlen(src);
++        if (!strncmp(src, "#EXT-X-STREAM-INF", 17)) {
++            char *line_end = src + len;
++            bool is_h264 = false;
++            for (char *q = src; q + 12 < line_end; q++) {
++                if (!strncmp(q, "CODECS=\"avc1", 12)) { is_h264 = true; break; }
++            }
++            char *next = line_end;
++            char *next_eol = *next ? strchr(next, '\n') : NULL;
++            size_t next_len = *next ? (next_eol ? (size_t) (next_eol - next) + 1 : strlen(next)) : 0;
++            if (!is_h264) {
++                src = next + next_len;   /* skip tag line and its URI line */
++                continue;
++            }
++            memmove(dst, src, len + next_len);
++            dst += len + next_len;
++            src = next + next_len;
++            continue;
++        }
++        memmove(dst, src, len);
++        dst += len;
++        src += len;
++    }
++    *dst = '\0';
++}
++
++/* Rubenchik Mirror (mpv backend): ffmpeg's HLS demuxer, used by mpv, probes EVERY variant and audio rendition before
++   playback starts and does not switch qualities during playback. So keep only the best (highest BANDWIDTH) video variant
++   and the audio/subtitle renditions of its group. Edits the string in place (the result is never longer). */
++static bool hls_attr(const char *line, size_t len, const char *key, char *out, size_t outlen) {
++    size_t klen = strlen(key);
++    for (size_t i = 0; i + klen <= len; i++) {
++        if ((i == 0 || line[i - 1] == ',' || line[i - 1] == ':') && !strncmp(line + i, key, klen)) {
++            const char *v = line + i + klen;
++            bool quoted = (*v == '"');
++            if (quoted) v++;
++            size_t n = 0;
++            while (v + n < line + len && v[n] != '\n' && v[n] != '\r' && (quoted ? v[n] != '"' : v[n] != ',') && n + 1 < outlen) {
++                out[n] = v[n];
++                n++;
++            }
++            out[n] = '\0';
++            return true;
++        }
++    }
++    return false;
++}
++
++static void prune_master_for_mpv(char *playlist) {
++    if (!playlist || !strstr(playlist, "#EXT-X-STREAM-INF")) {
++        return;
++    }
++    const char *best_line = NULL;
++    long best_bw = -1;
++    char best_audio[64] = "", best_subs[64] = "";
++    for (const char *l = playlist; *l; ) {
++        const char *e = strchr(l, '\n');
++        size_t len = e ? (size_t) (e - l) + 1 : strlen(l);
++        if (!strncmp(l, "#EXT-X-STREAM-INF", 17)) {
++            char bw[32];
++            if (hls_attr(l, len, "BANDWIDTH=", bw, sizeof(bw))) {
++                long b = atol(bw);
++                if (b > best_bw) {
++                    best_bw = b;
++                    best_line = l;
++                    best_audio[0] = best_subs[0] = '\0';
++                    hls_attr(l, len, "AUDIO=", best_audio, sizeof(best_audio));
++                    hls_attr(l, len, "SUBTITLES=", best_subs, sizeof(best_subs));
++                }
++            }
++        }
++        l += len;
++    }
++    if (!best_line) {
++        return;
++    }
++    char *out = (char *) calloc(strlen(playlist) + 1, 1);
++    if (!out) {
++        return;
++    }
++    char *dst = out;
++    bool keep_next_uri = false, skip_next_uri = false;
++    for (const char *l = playlist; *l; ) {
++        const char *e = strchr(l, '\n');
++        size_t len = e ? (size_t) (e - l) + 1 : strlen(l);
++        bool keep = true;
++        if (keep_next_uri || skip_next_uri) {
++            keep = keep_next_uri;
++            keep_next_uri = skip_next_uri = false;
++        } else if (!strncmp(l, "#EXT-X-STREAM-INF", 17)) {
++            keep = (l == best_line);
++            if (keep) keep_next_uri = true; else skip_next_uri = true;
++        } else if (!strncmp(l, "#EXT-X-I-FRAME-STREAM-INF", 25)) {
++            keep = false;
++        } else if (!strncmp(l, "#EXT-X-MEDIA:", 13)) {
++            char type[32] = "", group[64] = "";
++            hls_attr(l, len, "TYPE=", type, sizeof(type));
++            hls_attr(l, len, "GROUP-ID=", group, sizeof(group));
++            if (!strcmp(type, "AUDIO")) {
++                keep = !best_audio[0] || !strcmp(group, best_audio);
++            } else if (!strcmp(type, "SUBTITLES")) {
++                keep = best_subs[0] && !strcmp(group, best_subs);
++            }
++        }
++        if (keep) {
++            memcpy(dst, l, len);
++            dst += len;
++        }
++        l += len;
++    }
++    *dst = '\0';
++    strcpy(playlist, out);
++    free(out);
++}
++
+ char * select_master_playlist_language(airplay_video_t *airplay_video, char *master_playlist) {
+     assert(master_playlist);
++#ifdef _WIN32
++    /* Rubenchik Mirror: when the mpv backend plays the video, leave all audio tracks in the playlist: YouTube marks
++       the original track DEFAULT=YES and mpv selects it (and lets the user switch tracks). */
++    if (mpv_hls_available()) {
++        prune_master_for_mpv(master_playlist);
++        return master_playlist;
++    }
++#endif
+     /* filter out unwanted language renderings (AUDIO, SUBTITLES)  from  master playlist
+ 
+     keep just one language per AUDIO rendition group, set DEFAULT=YES, AUTOSELECT= YES.
+@@ -868,6 +1005,7 @@ char * select_master_playlist_language(airplay_video_t *airplay_video, char *mas
+         free (master_playlist);
+     }
+     free(slice);
++    keep_only_h264_variants(new_master_playlist);
+     return new_master_playlist;
+ }
+ 
+diff --git a/lib/http_handlers.h b/lib/http_handlers.h
+index a19d2ad..105436a 100644
+--- a/lib/http_handlers.h
++++ b/lib/http_handlers.h
+@@ -186,6 +186,49 @@ http_handler_set_property(raop_conn_t *conn,
+ 
+     */
+ 
++    if (!strcmp(property, "selectedMediaArray") && raop->callbacks.on_video_media_select) {
++        /* Rubenchik Mirror: report the client's audio (soun) / subtitle (sbtl) selection */
++        int datalen = 0;
++        const char *body = http_request_get_data(request, &datalen);
++        plist_t root = NULL;
++        if (body && datalen > 0) {
++            if (datalen > 8 && !memcmp(body, "bplist00", 8)) {
++                plist_from_bin(body, datalen, &root);
++            } else {
++                plist_from_xml(body, datalen, &root);
++            }
++        }
++        if (root) {
++            int sub_on = 0;
++            char *sub_lang = NULL, *audio_lang = NULL, *audio_name = NULL;
++            plist_t arr = plist_dict_get_item(root, "value");
++            uint32_t n = (arr && PLIST_IS_ARRAY(arr)) ? plist_array_get_size(arr) : 0;
++            for (uint32_t i = 0; i < n; i++) {
++                plist_t item = plist_array_get_item(arr, i);
++                plist_t t = plist_dict_get_item(item, "MediaSelectionGroupMediaType");
++                char *type = NULL;
++                if (t) plist_get_string_val(t, &type);
++                if (!type) continue;
++                plist_t l = plist_dict_get_item(item, "MediaSelectionOptionsLanguageCode");
++                plist_t nm = plist_dict_get_item(item, "MediaSelectionOptionsName");
++                if (!strcmp(type, "sbtl")) {
++                    if (plist_dict_get_item(item, "MediaSelectionOptionsPersistentID")) {
++                        sub_on = 1;
++                        if (l) plist_get_string_val(l, &sub_lang);
++                    }
++                } else if (!strcmp(type, "soun")) {
++                    if (l) plist_get_string_val(l, &audio_lang);
++                    if (nm) plist_get_string_val(nm, &audio_name);
++                }
++                free(type);
++            }
++            logger_log(raop->logger, LOGGER_INFO, "selectedMediaArray: subtitles %s (%s), audio lang=%s name=%s",
++                       sub_on ? "ON" : "off", sub_lang ? sub_lang : "-", audio_lang ? audio_lang : "-", audio_name ? audio_name : "-");
++            raop->callbacks.on_video_media_select(raop->callbacks.cls, sub_on, sub_lang, audio_lang, audio_name);
++            free(sub_lang); free(audio_lang); free(audio_name);
++            plist_free(root);
++        }
++    }
+     if (!strcmp(property, "actionAtItemEnd") ||
+         !strcmp(property, "selectedMediaArray") ||
+         !strcmp(property, "reverseEndTime") ||
+diff --git a/lib/raop.h b/lib/raop.h
+index dd9c774..71d1cfa 100644
+--- a/lib/raop.h
++++ b/lib/raop.h
+@@ -119,6 +119,8 @@ struct raop_callbacks_s {
+     void  (*on_video_stop) (void *cls);
+     void  (*on_video_acquire_playback_info) (void *cls, playback_info_t *playback_video);
+     float  (*on_video_playlist_remove) (void *cls);
++    /* Rubenchik Mirror: client changed audio/subtitle selection (selectedMediaArray) */
++    void  (*on_video_media_select) (void *cls, int sub_on, const char *sub_lang, const char *audio_lang, const char *audio_name);
+     void  (*get_custom_profile) (void *cls, const char **custom_profile);
+ };
+ 
+diff --git a/renderers/mpv_hls.h b/renderers/mpv_hls.h
+new file mode 100644
+index 0000000..425f71a
+--- /dev/null
++++ b/renderers/mpv_hls.h
+@@ -0,0 +1,395 @@
++/*
++ * Rubenchik Mirror: optional mpv backend for AirPlay HLS (YouTube) playback on Windows.
++ *
++ * GStreamer's playbin3/hlsdemux2 freezes after seeking on many Windows systems, so for HLS video we run
++ * mpv.exe (placed next to uxplay.exe) and control it over its JSON IPC named pipe.
++ * One mpv instance (one window) is kept alive between videos: a new video is loaded into the same window, and the
++ * window is closed a few seconds after playback has ended.
++ * Header-only, Windows-only; on other platforms every function reports "not available" and the
++ * GStreamer code path is used.
++ *
++ * License: GPL-3.0-or-later (same as UxPlay).
++ */
++#ifndef MPV_HLS_H
++#define MPV_HLS_H
++
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#ifdef _WIN32
++#include <windows.h>
++
++#define MPV_IDLE_CLOSE_MS 5000
++
++static HANDLE mpv_proc = NULL;
++static HANDLE mpv_pipe = INVALID_HANDLE_VALUE;
++static HANDLE mpv_job = NULL;
++static HANDLE mpv_watcher = NULL;
++static CRITICAL_SECTION mpv_lock;
++static bool mpv_lock_init = false;
++static int mpv_req_id = 0;
++static DWORD mpv_idle_since = 0;   /* tick count when playback stopped; 0 = playing */
++
++static void mpv_hls_lock(void) {
++    if (!mpv_lock_init) {
++        InitializeCriticalSection(&mpv_lock);
++        mpv_lock_init = true;
++    }
++    EnterCriticalSection(&mpv_lock);
++}
++static void mpv_hls_unlock(void) { LeaveCriticalSection(&mpv_lock); }
++
++static bool mpv_hls_path(char *out, size_t len) {
++    char exe[MAX_PATH];
++    DWORD n = GetModuleFileNameA(NULL, exe, MAX_PATH);
++    if (n == 0 || n >= MAX_PATH) return false;
++    char *slash = strrchr(exe, '\\');
++    if (!slash) return false;
++    *(slash + 1) = '\0';
++    snprintf(out, len, "%smpv.exe", exe);
++    return GetFileAttributesA(out) != INVALID_FILE_ATTRIBUTES;
++}
++
++/* true if the mpv backend can be used (mpv.exe found next to uxplay.exe and not disabled by RUBENCHIK_NO_MPV) */
++static bool mpv_hls_available(void) {
++    char p[MAX_PATH + 16];
++    if (getenv("RUBENCHIK_NO_MPV")) return false;
++    return mpv_hls_path(p, sizeof(p));
++}
++
++static bool mpv_hls_alive(void) {
++    if (!mpv_proc) return false;
++    return WaitForSingleObject(mpv_proc, 0) == WAIT_TIMEOUT;
++}
++
++/* Close mpv completely (window included). Caller holds the lock. */
++static void mpv_hls_quit_locked(void) {
++    if (mpv_pipe != INVALID_HANDLE_VALUE) {
++        const char *q = "{\"command\":[\"quit\"]}\n";
++        DWORD w;
++        WriteFile(mpv_pipe, q, (DWORD) strlen(q), &w, NULL);
++        CloseHandle(mpv_pipe);
++        mpv_pipe = INVALID_HANDLE_VALUE;
++    }
++    if (mpv_proc) {
++        if (WaitForSingleObject(mpv_proc, 800) == WAIT_TIMEOUT) {
++            TerminateProcess(mpv_proc, 0);
++        }
++        CloseHandle(mpv_proc);
++        mpv_proc = NULL;
++    }
++    mpv_idle_since = 0;
++}
++
++/* Send a JSON command line, wait (max 1.5 s) for the reply with our request_id; the reply text is copied to reply. */
++static bool mpv_hls_cmd(const char *json_command_array, char *reply, size_t reply_len) {
++    if (mpv_pipe == INVALID_HANDLE_VALUE) return false;
++    static char line[10240];
++    int id = ++mpv_req_id;
++    int n = snprintf(line, sizeof(line), "{\"command\":%s,\"request_id\":%d}\n", json_command_array, id);
++    DWORD w;
++    if (!WriteFile(mpv_pipe, line, (DWORD) n, &w, NULL)) return false;
++    static char buf[65536];
++    size_t have = 0;
++    char key[32];
++    snprintf(key, sizeof(key), "\"request_id\":%d", id);
++    DWORD start = GetTickCount();
++    while (GetTickCount() - start < 1500) {
++        DWORD avail = 0;
++        if (!PeekNamedPipe(mpv_pipe, NULL, 0, NULL, &avail, NULL)) return false;
++        if (avail == 0) { Sleep(2); continue; }
++        DWORD r = 0;
++        if (have + 1 >= sizeof(buf)) have = 0;
++        if (!ReadFile(mpv_pipe, buf + have, (DWORD) (sizeof(buf) - 1 - have), &r, NULL) || r == 0) return false;
++        have += r;
++        buf[have] = '\0';
++        char *ls = buf;
++        char *nl;
++        while ((nl = strchr(ls, '\n'))) {
++            *nl = '\0';
++            if (strstr(ls, key)) {
++                if (reply) { strncpy(reply, ls, reply_len - 1); reply[reply_len - 1] = '\0'; }
++                return true;
++            }
++            ls = nl + 1;
++        }
++        have = strlen(ls);
++        memmove(buf, ls, have + 1);
++    }
++    return false;
++}
++
++static bool mpv_hls_get_number(const char *prop, double *value) {
++    char cmd[128], reply[512];
++    snprintf(cmd, sizeof(cmd), "[\"get_property\",\"%s\"]", prop);
++    if (!mpv_hls_cmd(cmd, reply, sizeof(reply))) return false;
++    if (!strstr(reply, "\"error\":\"success\"")) return false;
++    char *d = strstr(reply, "\"data\":");
++    if (!d) return false;
++    *value = strtod(d + 7, NULL);
++    return true;
++}
++
++static bool mpv_hls_get_bool(const char *prop, bool *value) {
++    char cmd[128], reply[512];
++    snprintf(cmd, sizeof(cmd), "[\"get_property\",\"%s\"]", prop);
++    if (!mpv_hls_cmd(cmd, reply, sizeof(reply))) return false;
++    if (!strstr(reply, "\"error\":\"success\"")) return false;
++    char *d = strstr(reply, "\"data\":");
++    if (!d) return false;
++    *value = (strncmp(d + 7, "true", 4) == 0);
++    return true;
++}
++
++/* background thread: close the (idle, black) mpv window a few seconds after playback ended */
++static DWORD WINAPI mpv_hls_watcher(LPVOID arg) {
++    (void) arg;
++    for (;;) {
++        Sleep(500);
++        mpv_hls_lock();
++        if (mpv_idle_since && (GetTickCount() - mpv_idle_since) > MPV_IDLE_CLOSE_MS) {
++            mpv_hls_quit_locked();
++        }
++        mpv_hls_unlock();
++    }
++    return 0;
++}
++
++/* Spawn mpv (idle, no file) and connect to its IPC pipe. Caller holds the lock. */
++static bool mpv_hls_spawn_locked(bool fullscreen, double volume, const char *title) {
++    char exe[MAX_PATH + 16];
++    if (!mpv_hls_path(exe, sizeof(exe))) return false;
++    char pipe_name[128];
++    snprintf(pipe_name, sizeof(pipe_name), "\\\\.\\pipe\\rubenchik-mirror-mpv-%lu", (unsigned long) GetCurrentProcessId());
++    char logopt[600] = "";
++    if (getenv("RUBENCHIK_MPV_LOG")) {
++        snprintf(logopt, sizeof(logopt), "--log-file=\"%s\" --msg-level=all=v ", getenv("RUBENCHIK_MPV_LOG"));
++    }
++    /* fonts for subtitles: use the fontconfig configuration shipped with the app (<app>\etc\fonts), if present */
++    {
++        char fc[MAX_PATH + 32];
++        snprintf(fc, sizeof(fc), "%s", exe);
++        char *sl = strrchr(fc, '\\');
++        if (sl) {
++            *sl = 0;                          /* now ...\bin */
++            sl = strrchr(fc, '\\');
++            if (sl) {
++                *sl = 0;                      /* now the app root */
++                strncat(fc, "\\etc\\fonts", sizeof(fc) - strlen(fc) - 1);
++                if (GetFileAttributesA(fc) != INVALID_FILE_ATTRIBUTES) {
++                    SetEnvironmentVariableA("FONTCONFIG_PATH", fc);
++                }
++            }
++        }
++    }
++    char cmdline[4096];
++    snprintf(cmdline, sizeof(cmdline),
++             "\"%s\" --no-config --idle=yes --force-window=yes --title=\"%s\" --input-ipc-server=%s --keep-open=no "
++             "--osc=no --no-terminal --ytdl=no --hwdec=auto-safe --cache=yes --demuxer-lavf-analyzeduration=2 %s--volume=%d %s",
++             exe, title ? title : "Rubenchik Mirror", pipe_name, logopt,
++             (int) (volume * 100.0 > 100.0 ? 100 : volume * 100.0), fullscreen ? "--fs" : "");
++    STARTUPINFOA si;
++    PROCESS_INFORMATION pi;
++    memset(&si, 0, sizeof(si));
++    si.cb = sizeof(si);
++    memset(&pi, 0, sizeof(pi));
++    if (!CreateProcessA(NULL, cmdline, NULL, NULL, FALSE, CREATE_NO_WINDOW | CREATE_SUSPENDED, NULL, NULL, &si, &pi)) {
++        return false;
++    }
++    /* make mpv die together with uxplay */
++    if (!mpv_job) {
++        mpv_job = CreateJobObjectA(NULL, NULL);
++        if (mpv_job) {
++            JOBOBJECT_EXTENDED_LIMIT_INFORMATION info;
++            memset(&info, 0, sizeof(info));
++            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
++            SetInformationJobObject(mpv_job, JobObjectExtendedLimitInformation, &info, sizeof(info));
++        }
++    }
++    if (mpv_job) AssignProcessToJobObject(mpv_job, pi.hProcess);
++    ResumeThread(pi.hThread);
++    CloseHandle(pi.hThread);
++    mpv_proc = pi.hProcess;
++    DWORD t0 = GetTickCount();
++    while (GetTickCount() - t0 < 8000) {
++        mpv_pipe = CreateFileA(pipe_name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
++        if (mpv_pipe != INVALID_HANDLE_VALUE) break;
++        if (!mpv_hls_alive()) break;
++        Sleep(50);
++    }
++    if (mpv_pipe == INVALID_HANDLE_VALUE) {
++        mpv_hls_quit_locked();
++        return false;
++    }
++    if (!mpv_watcher) {
++        mpv_watcher = CreateThread(NULL, 0, mpv_hls_watcher, NULL, 0, NULL);
++    }
++    return true;
++}
++
++/* JSON-escape a URL for embedding in a command */
++static void mpv_hls_json_escape(const char *in, char *out, size_t outlen) {
++    size_t j = 0;
++    for (size_t i = 0; in[i] && j + 3 < outlen; i++) {
++        if (in[i] == '"' || in[i] == '\\') out[j++] = '\\';
++        out[j++] = in[i];
++    }
++    out[j] = '\0';
++}
++
++/* Play url starting at start_pos seconds, in the existing mpv window if there is one. Returns false on failure. */
++static bool mpv_hls_start(const char *url, double start_pos, bool fullscreen, double volume, const char *title) {
++    mpv_hls_lock();
++    if (!(mpv_hls_alive() && mpv_pipe != INVALID_HANDLE_VALUE)) {
++        mpv_hls_quit_locked();
++        if (!mpv_hls_spawn_locked(fullscreen, volume, title)) {
++            mpv_hls_unlock();
++            return false;
++        }
++    }
++    static char esc[4096];
++    static char cmd[5000];
++    mpv_hls_json_escape(url, esc, sizeof(esc));
++    snprintf(cmd, sizeof(cmd), "[\"loadfile\",\"%s\",\"replace\",-1,{\"start\":\"%.3f\",\"pause\":\"no\"}]", esc, start_pos > 0 ? start_pos : 0.0);
++    char reply[512];
++    bool ok = mpv_hls_cmd(cmd, reply, sizeof(reply)) && strstr(reply, "\"error\":\"success\"");
++    if (ok) {
++        mpv_idle_since = 0;
++        mpv_hls_cmd("[\"set_property\",\"speed\",1.0]", NULL, 0);
++    }
++    mpv_hls_unlock();
++    return ok;
++}
++
++/* Stop playback. The window stays for a few seconds (in case another video follows) and is then closed. */
++static void mpv_hls_stop(void) {
++    mpv_hls_lock();
++    if (mpv_hls_alive() && mpv_pipe != INVALID_HANDLE_VALUE) {
++        mpv_hls_cmd("[\"stop\"]", NULL, 0);
++        if (!mpv_idle_since) mpv_idle_since = GetTickCount() | 1;
++    }
++    mpv_hls_unlock();
++}
++
++static void mpv_hls_set_pause(bool pause) {
++    mpv_hls_lock();
++    mpv_hls_cmd(pause ? "[\"set_property\",\"pause\",true]" : "[\"set_property\",\"pause\",false]", NULL, 0);
++    mpv_hls_unlock();
++}
++
++static void mpv_hls_seek(double position) {
++    char cmd[128];
++    snprintf(cmd, sizeof(cmd), "[\"seek\",%.3f,\"absolute\"]", position);
++    mpv_hls_lock();
++    mpv_hls_cmd(cmd, NULL, 0);
++    mpv_hls_unlock();
++}
++
++static void mpv_hls_set_speed(double speed) {
++    char cmd[128];
++    snprintf(cmd, sizeof(cmd), "[\"set_property\",\"speed\",%.3f]", speed);
++    mpv_hls_lock();
++    mpv_hls_cmd(cmd, NULL, 0);
++    mpv_hls_unlock();
++}
++
++/* find the id of the first track of the given type ("audio" or "sub") whose language starts with the first two letters of
++   lang (any track if lang is empty); returns -1 if none. json is mpv's reply to get_property track-list. */
++static int mpv_hls_find_track(const char *json, const char *type, const char *lang) {
++    char want_type[32];
++    snprintf(want_type, sizeof(want_type), "\"type\":\"%s\"", type);
++    const char *p = json;
++    while ((p = strstr(p, "{\"id\":")) != NULL) {
++        const char *next = strstr(p + 6, "{\"id\":");
++        size_t len = next ? (size_t) (next - p) : strlen(p);
++        char obj[2048];
++        if (len >= sizeof(obj)) len = sizeof(obj) - 1;
++        memcpy(obj, p, len);
++        obj[len] = '\0';
++        if (strstr(obj, want_type)) {
++            bool ok = true;
++            if (lang && lang[0] && strcmp(lang, "und")) {
++                char key[16];
++                const char *l = strstr(obj, "\"lang\":\"");
++                snprintf(key, sizeof(key), "%.2s", lang);
++                ok = l && !_strnicmp(l + 8, key, 2);
++            }
++            if (ok) return atoi(p + 6);
++        }
++        p += 6;
++    }
++    return -1;
++}
++
++static void mpv_hls_select_media(int sub_on, const char *sub_lang, const char *audio_lang) {
++    static char reply[65536];
++    mpv_hls_lock();
++    if (mpv_hls_cmd("[\"get_property\",\"track-list\"]", reply, sizeof(reply))) {
++        char cmd[96];
++        if (audio_lang && audio_lang[0] && strcmp(audio_lang, "und")) {
++            int id = mpv_hls_find_track(reply, "audio", audio_lang);
++            if (id > 0) {
++                snprintf(cmd, sizeof(cmd), "[\"set_property\",\"aid\",%d]", id);
++                mpv_hls_cmd(cmd, NULL, 0);
++            }
++        }
++        if (sub_on) {
++            int id = mpv_hls_find_track(reply, "sub", sub_lang);
++            if (id < 0) id = mpv_hls_find_track(reply, "sub", NULL);
++            if (id > 0) {
++                snprintf(cmd, sizeof(cmd), "[\"set_property\",\"sid\",%d]", id);
++                mpv_hls_cmd(cmd, NULL, 0);
++                mpv_hls_cmd("[\"set_property\",\"sub-visibility\",true]", NULL, 0);
++            }
++        } else {
++            mpv_hls_cmd("[\"set_property\",\"sid\",\"no\"]", NULL, 0);
++        }
++    }
++    mpv_hls_unlock();
++}
++
++static void mpv_hls_set_volume(double volume_0_to_1) {
++    char cmd[128];
++    snprintf(cmd, sizeof(cmd), "[\"set_property\",\"volume\",%.1f]", volume_0_to_1 * 100.0);
++    mpv_hls_lock();
++    mpv_hls_cmd(cmd, NULL, 0);
++    mpv_hls_unlock();
++}
++
++/* Returns false once the video has finished (mpv idle) or mpv has exited (window closed). */
++static bool mpv_hls_info(double *duration, double *position, bool *paused, bool *buffering) {
++    mpv_hls_lock();
++    bool alive = mpv_hls_alive() && mpv_pipe != INVALID_HANDLE_VALUE;
++    if (alive) {
++        bool idle = false;
++        if (mpv_hls_get_bool("idle-active", &idle) && idle) {
++            alive = false;
++        } else {
++            double d = 0, p = -1;
++            bool b = false, pz = false;
++            if (mpv_hls_get_number("duration", &d)) *duration = d;
++            if (mpv_hls_get_number("time-pos", &p)) *position = p;
++            if (mpv_hls_get_bool("pause", &pz)) *paused = pz;
++            if (mpv_hls_get_bool("paused-for-cache", &b)) *buffering = b;
++        }
++    }
++    mpv_hls_unlock();
++    return alive;
++}
++
++#else  /* not Windows: backend unavailable */
++
++static bool mpv_hls_available(void) { return false; }
++static bool mpv_hls_start(const char *url, double start_pos, bool fullscreen, double volume, const char *title) { (void) url; (void) start_pos; (void) fullscreen; (void) volume; (void) title; return false; }
++static void mpv_hls_stop(void) {}
++static void mpv_hls_set_pause(bool pause) { (void) pause; }
++static void mpv_hls_seek(double position) { (void) position; }
++static void mpv_hls_set_volume(double v) { (void) v; }
++static void mpv_hls_set_speed(double s) { (void) s; }
++static void mpv_hls_select_media(int a, const char *b, const char *c) { (void) a; (void) b; (void) c; }
++static bool mpv_hls_info(double *duration, double *position, bool *paused, bool *buffering) { (void) duration; (void) position; (void) paused; (void) buffering; return false; }
++
++#endif
++#endif /* MPV_HLS_H */
+diff --git a/renderers/video_renderer.c b/renderers/video_renderer.c
+index b6c1f1c..f2f1bb8 100644
+--- a/renderers/video_renderer.c
++++ b/renderers/video_renderer.c
+@@ -23,6 +23,7 @@
+ #include <gst/gst.h>
+ #include <gst/app/gstappsrc.h>
+ #include "video_renderer.h"
++#include "mpv_hls.h"
+ #include <gst/video/videooverlay.h>
+ 
+ static uintptr_t external_window_handle = 0;
+@@ -61,6 +62,14 @@ static logger_t *logger = NULL;
+ static bool first_packet = false;
+ static bool sync = false;
+ static bool hls_video = false;
++/* Rubenchik Mirror: mpv backend for HLS (see mpv_hls.h) */
++static bool use_mpv = false;
++static bool mpv_started = false;
++static bool mpv_fs = false;
++static double mpv_speed = 1.0;
++static int pending_sub_on = -1;    /* -1: no client selection received yet */
++static char pending_sub_lang[16] = "";
++static char pending_audio_lang[16] = "";
+ #ifdef X_DISPLAY_FIX
+ static bool use_x11 = false;
+ #endif
+@@ -271,6 +280,12 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
+     GstCaps *caps = NULL;
+     bool rtp = (bool) strlen(rtp_pipeline);
+     hls_video = (uri != NULL);
++    mpv_fs = initial_fullscreen;
++    use_mpv = hls_video && mpv_hls_available();
++    mpv_started = false;
++    if (use_mpv) {
++        logger_log(logger, LOGGER_INFO, "HLS video will be played with mpv (mpv.exe)");
++    }
+     /* videosink choices that are auto */
+     bool auto_videosink = (strstr(videosink, "autovideosink") || strstr(videosink, "fpsdisplaysink"));
+ 
+@@ -503,6 +518,10 @@ void video_renderer_pause() {
+     if (!renderer) {
+         return;
+     }
++    if (hls_video && use_mpv) {
++        mpv_hls_set_pause(true);
++        return;
++    }
+     GstStateChangeReturn ret = gst_element_set_state(renderer->pipeline, GST_STATE_PAUSED);
+     logger_log(logger, LOGGER_DEBUG, "video renderer pause: %s", gst_element_state_change_return_get_name(ret));
+ }
+@@ -511,6 +530,10 @@ void video_renderer_resume() {
+     if (!renderer) {
+         return;
+     }
++    if (hls_video && use_mpv) {
++        mpv_hls_set_pause(false);
++        return;
++    }
+     gst_element_set_state (renderer->pipeline, GST_STATE_PLAYING);
+     GstState state;
+     /* wait with timeout 100 msec for pipeline to change state from PAUSED to PLAYING */
+@@ -525,6 +548,21 @@ void video_renderer_resume() {
+ void video_renderer_start() {
+     GstState state;
+     const gchar *state_name = NULL;
++    if (hls_video && use_mpv) {
++        double start = (hls_requested_start_position > 0) ? ((double) hls_requested_start_position / GST_SECOND) : 0.0;
++        if (mpv_hls_start(renderer->uri, start, mpv_fs, hls_volume_level, "Rubenchik Mirror")) {
++            mpv_started = true;
++            mpv_speed = 1.0;
++            hls_requested_start_position = 0;
++            if (pending_sub_on >= 0) {
++                mpv_hls_select_media(pending_sub_on, pending_sub_lang, pending_audio_lang);
++            }
++            logger_log(logger, LOGGER_INFO, "mpv started at %.1f s", start);
++            return;
++        }
++        logger_log(logger, LOGGER_ERR, "could not start mpv: falling back to GStreamer for HLS video");
++        use_mpv = false;
++    }
+     if (hls_video) {
+         g_object_set (G_OBJECT (renderer->pipeline), "uri", renderer->uri, NULL);
+         gst_element_set_state (renderer->pipeline, GST_STATE_PAUSED);
+@@ -684,6 +722,11 @@ void video_renderer_flush() {
+ void video_renderer_hls_ready() {
+     GstState state;
+     GstStateChangeReturn ret;
++    if (renderer && hls_video && use_mpv) {
++        mpv_hls_stop();
++        mpv_started = false;
++        return;
++    }
+     if (renderer && hls_video) {
+         logger_log(logger, LOGGER_DEBUG,"video_renderer_hls_ready");
+         ret = gst_element_set_state (renderer->pipeline, GST_STATE_READY);
+@@ -695,6 +738,10 @@ void video_renderer_hls_ready() {
+ }
+ 
+ void video_renderer_stop() {
++    if (hls_video && use_mpv) {
++        mpv_hls_stop();
++        mpv_started = false;
++    }
+     if (renderer) {
+         logger_log(logger, LOGGER_DEBUG,"video_renderer_stop");
+         if (renderer->appsrc) {
+@@ -735,6 +782,10 @@ void video_renderer_set_track_metadata(const char *title, const char *artist, co
+ 
+ static void video_renderer_destroy_instance(video_renderer_t *renderer) {
+     if (renderer) {
++        if (hls_video && use_mpv) {
++            mpv_hls_stop();
++            mpv_started = false;
++        }
+         logger_log(logger, LOGGER_DEBUG,"destroying renderer instance %p codec=%s ", renderer, renderer->codec);
+         GstState state;
+         GstStateChangeReturn ret;
+@@ -825,7 +876,7 @@ static void hls_video_seek_to_start_position(GstElement *pipeline) {
+         && hls_requested_start_position  <= hls_seek_end) {
+         g_print("***************** seek to hls_requested_start_position %" GST_TIME_FORMAT "\n", GST_TIME_ARGS(hls_requested_start_position));
+         if (gst_element_seek_simple (pipeline, GST_FORMAT_TIME,
+-                                     (GstSeekFlags) (GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_ACCURATE),
++                                     (GstSeekFlags) (GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_KEY_UNIT),
+                                      hls_requested_start_position)) {
+             hls_requested_start_position = 0;
+         } else {
+@@ -1143,6 +1194,25 @@ bool video_get_playback_info(double *duration, double *position, double *seek_st
+         return true;
+     }
+ 
++    if (hls_video && use_mpv) {
++        if (!mpv_started) {
++            return true;
++        }
++        double d = 0.0, pz = -1.0;
++        bool paused = false, buffering = false;
++        if (!mpv_hls_info(&d, &pz, &paused, &buffering)) {
++            return false;    /* mpv has exited: video finished or window closed */
++        }
++        *duration = d;
++        *position = (d > 0.0) ? pz : -1.0;
++        *seek_start = 0.0;
++        *seek_duration = d;
++        *rate = paused ? 0.0f : (float) mpv_speed;
++        *buffer_empty = buffering;
++        *buffer_full = !buffering;
++        return true;
++    }
++
+     if (hls_seek_enabled) {
+         *seek_start = ((double) hls_seek_start) / GST_SECOND;
+         *seek_duration = ((double) (hls_seek_end - hls_seek_start)) / GST_SECOND;     
+@@ -1185,6 +1255,10 @@ void video_renderer_set_start(float position) {
+ }
+ 
+ void video_renderer_seek(float position) {
++    if (hls_video && use_mpv) {
++        mpv_hls_seek((double) position);
++        return;
++    }
+      gint64 seek_position = (gint64) ((double) position * GST_SECOND);
+     /* don't seek to within 1  microsecond  of beginning or end of video */
+     if (!renderer || hls_duration < 2000) return;
+@@ -1193,7 +1267,7 @@ void video_renderer_seek(float position) {
+     g_print("SCRUB: seek to %f secs =  %" GST_TIME_FORMAT ", duration = %" GST_TIME_FORMAT "\n", position,
+             GST_TIME_ARGS(seek_position),  GST_TIME_ARGS(hls_duration));
+     gboolean result = gst_element_seek_simple(renderer->pipeline, GST_FORMAT_TIME,
+-                                              (GstSeekFlags)(GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_ACCURATE),
++                                              (GstSeekFlags)(GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_KEY_UNIT),
+                                               seek_position);
+     if (result) {
+         g_print("seek succeeded\n");
+@@ -1218,6 +1292,23 @@ bool video_renderer_eos_watch() {
+     return false; 
+ }
+ 
++void video_renderer_set_speed(float rate) {
++    if (hls_video && use_mpv) {
++        mpv_speed = (double) rate;
++        mpv_hls_set_speed(mpv_speed);
++    }
++}
++
++void video_renderer_select_media(int sub_on, const char *sub_lang, const char *audio_lang, const char *audio_name) {
++    (void) audio_name;
++    pending_sub_on = sub_on;
++    snprintf(pending_sub_lang, sizeof(pending_sub_lang), "%s", sub_lang ? sub_lang : "");
++    snprintf(pending_audio_lang, sizeof(pending_audio_lang), "%s", audio_lang ? audio_lang : "");
++    if (hls_video && use_mpv && mpv_started) {
++        mpv_hls_select_media(pending_sub_on, pending_sub_lang, pending_audio_lang);
++    }
++}
++
+ void video_renderer_hls_set_volume(double volume) {
+     if (!renderer || strcmp(renderer->codec, hls)) {
+        return;
+@@ -1225,6 +1316,10 @@ void video_renderer_hls_set_volume(double volume) {
+     volume = (volume > 10.0) ? 10.0 : volume;
+     volume = (volume < 0.0) ? 0.0 : volume;
+     hls_volume_level = (gdouble) volume;
++    if (use_mpv) {
++        mpv_hls_set_volume(volume > 1.0 ? 1.0 : volume);
++        return;
++    }
+     if (renderer && !strcmp(renderer->codec, hls)) {
+         g_object_set(renderer->pipeline, "volume", volume, NULL);
+     }
+diff --git a/renderers/video_renderer.h b/renderers/video_renderer.h
+index 4a6e012..1f733d1 100644
+--- a/renderers/video_renderer.h
++++ b/renderers/video_renderer.h
+@@ -83,6 +83,8 @@ int video_renderer_choose_codec_and_size (bool video_is_jpeg, bool video_is_h265
+ unsigned int video_renderer_listen(void *loop, int id);
+ bool video_renderer_eos_watch();
+ void video_renderer_hls_set_volume(double volume);
++void video_renderer_set_speed(float rate);
++void video_renderer_select_media(int sub_on, const char *sub_lang, const char *audio_lang, const char *audio_name);
+ void video_renderer_set_window_handle(uintptr_t handle);
+ bool gstreamer_decoder_check(const char *decoder);
+ #ifdef __cplusplus
+diff --git a/uxplay.cpp b/uxplay.cpp
+index 5ad4e39..c0d86f5 100644
+--- a/uxplay.cpp
++++ b/uxplay.cpp
+@@ -73,6 +73,9 @@
+ #include "renderers/video_renderer.h"
+ #include "renderers/audio_renderer.h"
+ #include "renderers/mux_renderer.h"
++#ifdef _WIN32
++#include <windows.h>
++#endif
+ #ifdef DBUS
+ #include <dbus/dbus.h>
+ #endif
+@@ -3106,14 +3109,23 @@ extern "C" void on_video_scrub(void *cls, const float position) {
+ extern "C" void on_video_rate(void *cls, const float rate) {
+     LOGI("on_video_rate = %7.5f\n", rate);
+     if (rate == 1.0f) {
++        video_renderer_set_speed(1.0f);
+         video_renderer_resume();
+     } else if (rate ==  0.0f) {
+         video_renderer_pause();
++    } else if (rate > 0.0f && rate <= 16.0f) {
++        /* playback speed change (e.g. 1.5x, 2x) */
++        video_renderer_set_speed(rate);
++        video_renderer_resume();
+     } else  {
+         LOGI("on_video_rate: ignoring unexpected value rate = %f\n", rate);
+     }
+ }
+ 
++extern "C" void on_video_media_select(void *cls, int sub_on, const char *sub_lang, const char *audio_lang, const char *audio_name) {
++    video_renderer_select_media(sub_on, sub_lang, audio_lang, audio_name);
++}
++
+ 
+ 
+ extern "C" float on_video_playlist_remove (void *cls) {
+@@ -3216,6 +3228,7 @@ static int start_raop_server (unsigned short display[5], unsigned short tcp[3],
+     raop_cbs.on_video_play = on_video_play;
+     raop_cbs.on_video_scrub = on_video_scrub;
+     raop_cbs.on_video_rate = on_video_rate;
++    raop_cbs.on_video_media_select = on_video_media_select;
+     raop_cbs.on_video_stop = on_video_stop;
+     raop_cbs.on_video_playlist_remove = on_video_playlist_remove;
+     raop_cbs.on_video_acquire_playback_info = on_video_acquire_playback_info;
+@@ -3377,6 +3390,15 @@ int main (int argc, char *argv[]) {
+ void real_main (int argc, char *argv[]) {
+ #else
+ int main (int argc, char *argv[]) {
++#endif
++#ifdef _WIN32
++    /* Rubenchik Mirror: hardware H.264/VP9 decoders (Direct3D 11/12, NVDEC) are unreliable on many Windows systems
++       and make HLS (YouTube) playback freeze on the first frame. Prefer software decoding unless the user sets
++       GST_PLUGIN_FEATURE_RANK himself. Must run before gst_init(). */
++    if (!getenv("GST_PLUGIN_FEATURE_RANK")) {
++        _putenv("GST_PLUGIN_FEATURE_RANK=d3d12h264dec:NONE,d3d11h264dec:NONE,nvh264dec:NONE,nvh264sldec:NONE,"
++                "nvautogpuh264dec:NONE,d3d12vp9dec:NONE,d3d11vp9dec:NONE,nvvp9dec:NONE");
++    }
+ #endif
+     std::vector<char> server_hw_addr;
+     std::string config_file = "";
+@@ -3475,7 +3497,20 @@ int main (int argc, char *argv[]) {
+                 std::replace(lang_system.begin(), lang_system.end(), '_', '-');
+             }
+         }
+-        g_assert(!lang_system.empty());
++        if (lang_system.empty()) {
++#ifdef _WIN32
++            /* Windows has no LANG/LANGUAGE: use the user's Windows display language (e.g. "ru-RU") */
++            wchar_t wname[LOCALE_NAME_MAX_LENGTH];
++            if (GetUserDefaultLocaleName(wname, LOCALE_NAME_MAX_LENGTH) > 0) {
++                for (int k = 0; wname[k] && k < LOCALE_NAME_MAX_LENGTH; k++) {
++                    lang_system += (char) wname[k];
++                }
++            }
++#endif
++            if (lang_system.empty()) {
++                lang_system = "en-US";
++            }
++        }
+     }
+ 
+ #ifdef _WIN32    /*  use utf-8 terminal output; don't buffer stdout in WIN32 when debug_log = false */

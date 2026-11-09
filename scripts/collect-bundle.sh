@@ -40,6 +40,14 @@ mkdir -p "$OUT/share/glib-2.0/schemas"
 cp "$PREFIX/share/glib-2.0/schemas/gschemas.compiled" "$OUT/share/glib-2.0/schemas/" \
   || { echo "::error::gschemas.compiled not found in $PREFIX"; exit 1; }
 
+# mpv plays YouTube (HLS) video; uxplay.exe looks for mpv.exe in its own folder. Its DLLs are collected below.
+cp "$PREFIX/bin/mpv.exe" "$OUT/bin/" || { echo "::error::mpv.exe not found in $PREFIX/bin"; exit 1; }
+# fontconfig configuration for mpv subtitles (uxplay sets FONTCONFIG_PATH to <app>/etc/fonts)
+if [[ -d "$PREFIX/etc/fonts" ]]; then
+  mkdir -p "$OUT/etc/fonts"
+  cp -r "$PREFIX/etc/fonts/." "$OUT/etc/fonts/"
+fi
+
 cp "$PREFIX/libexec/gstreamer-1.0/gst-plugin-scanner.exe" "$OUT/libexec/gstreamer-1.0/"
 # gst-inspect is copied for the CI check only; the workflow removes it before packaging.
 cp "$PREFIX/bin/gst-inspect-1.0.exe" "$OUT/bin/"

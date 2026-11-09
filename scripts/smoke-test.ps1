@@ -19,6 +19,14 @@ foreach ($flag in '-n ', '-nh', '-fs', '-s wxh', '-fps', '-vs ', '-rc', '-pin', 
 Write-Host "== GSettings schemas (needed by HLS/YouTube playback)"
 if (-not (Test-Path "$App\share\glib-2.0\schemas\gschemas.compiled")) { throw "gschemas.compiled missing from bundle" }
 
+Write-Host "== mpv (YouTube backend)"
+$mv = & "$bin\mpv.exe" --version 2>&1 | Out-String
+if ($LASTEXITCODE -ne 0 -or $mv -notmatch 'mpv') { throw "mpv.exe does not start from the bundle: $mv" }
+Write-Host ($mv -split "`n")[0]
+& "$bin\mpv.exe" --no-config --vo=null --ao=null --msg-level=all=error 'av://lavfi:testsrc=d=1:s=320x240' *> $null
+if ($LASTEXITCODE -ne 0) { throw "mpv could not play a generated test clip (exit $LASTEXITCODE)" }
+Write-Host "ok  mpv plays a test clip"
+
 Write-Host "== GStreamer elements"
 $required = 'appsrc','h264parse','avdec_h264','d3d11videosink','d3d11convert','videoconvert','audioconvert',
             'audioresample','wasapisink','queue','avdec_aac','avdec_alac','souphttpsrc','hlsdemux2','level','jpegdec','imagefreeze','textoverlay','videoscale','volume'
