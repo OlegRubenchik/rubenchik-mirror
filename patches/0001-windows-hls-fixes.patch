@@ -858,10 +858,10 @@ index 0000000..fc835c0
 +#endif /* RM_UPDATE_H */
 diff --git a/renderers/rm_window.h b/renderers/rm_window.h
 new file mode 100644
-index 0000000..a680df7
+index 0000000..7bd81d6
 --- /dev/null
 +++ b/renderers/rm_window.h
-@@ -0,0 +1,509 @@
+@@ -0,0 +1,785 @@
 +/*
 + * Rubenchik Mirror: branded host window (Windows only, header-only).
 + *
@@ -921,6 +921,25 @@ index 0000000..a680df7
 +static void (*rm_update_cb)(void) = NULL;  /* called when the button is clicked (NULL: busy, not clickable) */
 +static int rm_update_w = 0;                /* button width, measured when painting */
 +
++#define RM_MSG_PROMPT         (WM_APP + 1)   /* wParam: 1 = first-run name prompt, 2 = rename */
++#define RM_MSG_PROMPT_OK      (WM_APP + 2)
++#define RM_MSG_PROMPT_CANCEL  (WM_APP + 3)
++#define RM_MSG_PIN            (WM_APP + 4)
++
++static int rm_prompt = 0;                    /* 0: none, 1: asking the device name (first run), 2: renaming */
++static HWND rm_edit = NULL;
++static WNDPROC rm_edit_old = NULL;
++static HANDLE rm_name_event = NULL;
++static wchar_t rm_name_result[64] = L"";
++static wchar_t rm_prompt_initial[64] = L"";
++static wchar_t rm_device_name[64] = L"";     /* shown in the title bar; click it to rename */
++static int rm_name_w = 0;
++static HFONT rm_font_big = NULL, rm_font_pin = NULL, rm_font_edit = NULL;
++static HBRUSH rm_brush_edit = NULL;
++static void (*rm_rename_cb)(const wchar_t *name) = NULL;
++static char rm_pin[16] = "";                 /* pairing code to show on the idle screen */
++static DWORD rm_pin_tick = 0;
++
 +static int rm_title_h(void) { return rm_is_fullscreen ? 0 : RM_TITLE_H; }
 +
 +static void rm_ui_set_update(const char *label, void (*cb)(void)) {
@@ -944,12 +963,60 @@ index 0000000..a680df7
 +    return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
 +}
 +
++#define RM_EDIT_W 380
++#define RM_EDIT_H 38
++
++static void rm_prompt_rects(int width, int height, RECT *edit, RECT *btn, int *title_y) {
++    int th = rm_title_h();
++    int cx = width / 2, cy = th + (height - th) / 2;
++    edit->left = cx - RM_EDIT_W / 2;
++    edit->right = edit->left + RM_EDIT_W;
++    edit->top = cy - 8;
++    edit->bottom = edit->top + RM_EDIT_H;
++    btn->left = cx - 70;
++    btn->right = cx + 70;
++    btn->top = edit->bottom + 24;
++    btn->bottom = btn->top + 38;
++    *title_y = cy - 140;
++}
++
++static void rm_layout_edit(void) {
++    if (!rm_edit || !rm_host) return;
++    RECT cr, e, b;
++    int ty;
++    GetClientRect(rm_host, &cr);
++    rm_prompt_rects(cr.right, cr.bottom, &e, &b, &ty);
++    MoveWindow(rm_edit, e.left, e.top, e.right - e.left, e.bottom - e.top, TRUE);
++}
++
++static void rm_refresh_video(void) {
++    if (rm_video) ShowWindow(rm_video, (rm_state_now > 0 && !rm_prompt) ? SW_SHOWNA : SW_HIDE);
++}
++
++/* the device-name pill in the title bar (left of the update button) */
++static RECT rm_name_rect(int width) {
++    RECT r;
++    r.right = ((rm_update_label[0] && rm_update_w > 0) ? rm_update_rect(width).left : width - 3 * RM_BTN_W - 12) - 8;
++    r.left = r.right - rm_name_w;
++    r.top = 7;
++    r.bottom = RM_TITLE_H - 7;
++    return r;
++}
++
++static bool rm_in_name(int x, int y, int width) {
++    if (rm_is_fullscreen || !rm_device_name[0] || rm_name_w <= 0) return false;
++    RECT r = rm_name_rect(width);
++    if (r.left < 300) return false;
++    return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
++}
++
 +static void rm_layout(void) {
 +    if (!rm_host || !rm_video) return;
 +    RECT cr;
 +    GetClientRect(rm_host, &cr);
 +    int th = rm_title_h();
 +    MoveWindow(rm_video, 0, th, cr.right, cr.bottom - th > 0 ? cr.bottom - th : 0, TRUE);
++    rm_layout_edit();
 +}
 +
 +static RECT rm_button_rect(int which, int width) {   /* which: 1 minimize, 2 fullscreen, 3 close */
@@ -1057,6 +1124,26 @@ index 0000000..a680df7
 +            SetTextColor(dc, rm_update_cb ? RM_COL_BG : RM_COL_TEXT);
 +            TextOutA(dc, ur.left + 14, ur.top + ((ur.bottom - ur.top) - us.cy) / 2, rm_update_label, (int) strlen(rm_update_label));
 +        }
++        if (rm_device_name[0]) {
++            SelectObject(dc, rm_font_small);
++            SIZE ns;
++            GetTextExtentPoint32W(dc, rm_device_name, (int) wcslen(rm_device_name), &ns);
++            rm_name_w = ns.cx + 28;
++            RECT nr = rm_name_rect(cr.right);
++            if (nr.left >= 300) {
++                HBRUSH nb = CreateSolidBrush(RM_COL_HOVER);
++                HPEN np = CreatePen(PS_SOLID, 1, RM_COL_HOVER);
++                HBRUSH onb = (HBRUSH) SelectObject(dc, nb);
++                HPEN onp = (HPEN) SelectObject(dc, np);
++                RoundRect(dc, nr.left, nr.top, nr.right, nr.bottom, 12, 12);
++                SelectObject(dc, onb);
++                SelectObject(dc, onp);
++                DeleteObject(nb);
++                DeleteObject(np);
++                SetTextColor(dc, RM_COL_TEXT);
++                TextOutW(dc, nr.left + 14, nr.top + ((nr.bottom - nr.top) - ns.cy) / 2, rm_device_name, (int) wcslen(rm_device_name));
++            }
++        }
 +        for (int i = 1; i <= 3; i++) {
 +            RECT r = rm_button_rect(i, cr.right);
 +            if (rm_hover == i) {
@@ -1068,7 +1155,39 @@ index 0000000..a680df7
 +        }
 +    }
 +
-+    if (rm_state_now <= 0) {
++    if (rm_prompt) {
++        RECT er, br;
++        int ty;
++        rm_prompt_rects(cr.right, cr.bottom, &er, &br, &ty);
++        RECT tr = {0, ty, cr.right, ty + 44};
++        SelectObject(dc, rm_font_big);
++        SetTextColor(dc, RM_COL_TEXT);
++        DrawTextW(dc, rm_prompt == 1 ? L"Name this receiver" : L"Rename this receiver", -1, &tr, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
++        SelectObject(dc, rm_font_hint);
++        SetTextColor(dc, RM_COL_MUTED);
++        RECT s1 = {0, ty + 56, cr.right, ty + 80};
++        DrawTextW(dc, L"This is how it appears on your iPhone in the Screen Mirroring list.", -1, &s1, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
++        RECT s2 = {0, ty + 82, cr.right, ty + 106};
++        DrawTextW(dc, L"Give every PC its own name, for example Living Room or Bedroom.", -1, &s2, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
++        HBRUSH gb = CreateSolidBrush(RM_COL_GREEN);
++        HPEN gp = CreatePen(PS_SOLID, 1, RM_COL_GREEN);
++        HBRUSH ogb = (HBRUSH) SelectObject(dc, gb);
++        HPEN ogp = (HPEN) SelectObject(dc, gp);
++        RoundRect(dc, br.left, br.top, br.right, br.bottom, 16, 16);
++        SelectObject(dc, ogb);
++        SelectObject(dc, ogp);
++        DeleteObject(gb);
++        DeleteObject(gp);
++        SelectObject(dc, rm_font_title);
++        SetTextColor(dc, RM_COL_BG);
++        DrawTextW(dc, rm_prompt == 1 ? L"Start" : L"Save", -1, &br, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
++        if (rm_prompt == 2) {
++            SelectObject(dc, rm_font_small);
++            SetTextColor(dc, RM_COL_MUTED);
++            RECT esc = {0, br.bottom + 12, cr.right, br.bottom + 34};
++            DrawTextW(dc, L"Esc to cancel. The app restarts to apply the new name.", -1, &esc, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
++        }
++    } else if (rm_state_now <= 0) {
 +        RECT area = {0, th, cr.right, cr.bottom};
 +        int aw = area.right - area.left, ah = area.bottom - area.top;
 +        if (rm_logo && rm_logo_w > 0 && aw > 100 && ah > 100) {
@@ -1087,13 +1206,29 @@ index 0000000..a680df7
 +            DeleteDC(mem);
 +            SelectObject(dc, rm_font_hint);
 +            SetTextColor(dc, RM_COL_MUTED);
-+            const char *hint = "On your iPhone: Control Center  >  Screen Mirroring  >  Rubenchik Mirror";
-+            SIZE hs;
-+            GetTextExtentPoint32A(dc, hint, (int) strlen(hint), &hs);
-+            TextOutA(dc, area.left + (aw - hs.cx) / 2, y + h + 24, hint, (int) strlen(hint));
-+            const char *hint2 = "YouTube: tap the AirPlay icon in the YouTube app";
-+            GetTextExtentPoint32A(dc, hint2, (int) strlen(hint2), &hs);
-+            TextOutA(dc, area.left + (aw - hs.cx) / 2, y + h + 24 + 22, hint2, (int) strlen(hint2));
++            if (rm_pin[0] && (GetTickCount() - rm_pin_tick) < 180000) {
++                wchar_t digits[48] = L"";
++                int j = 0;
++                for (int k = 0; rm_pin[k] && j < 40; k++) {
++                    digits[j++] = (wchar_t) rm_pin[k];
++                    if (rm_pin[k + 1]) digits[j++] = L' ';
++                }
++                digits[j] = 0;
++                RECT l1 = {area.left, y + h + 14, area.right, y + h + 40};
++                DrawTextW(dc, L"Enter this code on your iPhone", -1, &l1, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
++                SelectObject(dc, rm_font_pin);
++                SetTextColor(dc, RM_COL_GREEN);
++                RECT l2 = {area.left, y + h + 40, area.right, y + h + 130};
++                DrawTextW(dc, digits, -1, &l2, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
++            } else {
++                wchar_t hint[200];
++                _snwprintf(hint, 200, L"On your iPhone: Control Center  >  Screen Mirroring  >  %ls",
++                           rm_device_name[0] ? rm_device_name : L"Rubenchik Mirror");
++                RECT l1 = {area.left, y + h + 22, area.right, y + h + 46};
++                DrawTextW(dc, hint, -1, &l1, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
++                RECT l2 = {area.left, y + h + 46, area.right, y + h + 70};
++                DrawTextW(dc, L"YouTube: tap the AirPlay icon in the YouTube app", -1, &l2, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
++            }
 +        }
 +    }
 +
@@ -1108,12 +1243,80 @@ index 0000000..a680df7
 +    if (st == rm_state_now) return;
 +    int prev = rm_state_now;
 +    rm_state_now = st;
-+    if (rm_video) ShowWindow(rm_video, st > 0 ? SW_SHOWNA : SW_HIDE);
++    rm_refresh_video();
++    if (st > 0) rm_pin[0] = 0;
 +    if (st > 0 && prev <= 0 && rm_auto_fullscreen && !rm_is_fullscreen) rm_set_fullscreen(true);
 +    if (rm_host) {
 +        SetWindowTextA(rm_host, st == 1 ? "Rubenchik Mirror - Mirroring" : st == 2 ? "Rubenchik Mirror - Playing" : "Rubenchik Mirror");
 +        InvalidateRect(rm_host, NULL, FALSE);
 +    }
++}
++
++static LRESULT CALLBACK rm_edit_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
++    if ((m == WM_KEYDOWN || m == WM_CHAR) && w == VK_RETURN) {
++        if (m == WM_KEYDOWN) PostMessage(rm_host, RM_MSG_PROMPT_OK, 0, 0);
++        return 0;
++    }
++    if ((m == WM_KEYDOWN || m == WM_CHAR) && w == VK_ESCAPE) {
++        if (m == WM_KEYDOWN) PostMessage(rm_host, RM_MSG_PROMPT_CANCEL, 0, 0);
++        return 0;
++    }
++    return CallWindowProcW(rm_edit_old, h, m, w, l);
++}
++
++static void rm_prompt_begin(int mode) {
++    rm_prompt = mode;
++    if (!rm_edit) {
++        rm_edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_BORDER | ES_AUTOHSCROLL, 0, 0, 10, 10, rm_host, NULL,
++                                  GetModuleHandle(NULL), NULL);
++        SendMessageW(rm_edit, WM_SETFONT, (WPARAM) rm_font_edit, TRUE);
++        SendMessageW(rm_edit, EM_LIMITTEXT, 40, 0);
++        rm_edit_old = (WNDPROC) SetWindowLongPtrW(rm_edit, GWLP_WNDPROC, (LONG_PTR) rm_edit_proc);
++    }
++    SetWindowTextW(rm_edit, rm_prompt_initial);
++    rm_layout_edit();
++    ShowWindow(rm_edit, SW_SHOW);
++    SendMessageW(rm_edit, EM_SETSEL, 0, -1);
++    SetFocus(rm_edit);
++    rm_refresh_video();
++    if (IsIconic(rm_host)) ShowWindow(rm_host, SW_RESTORE);
++    InvalidateRect(rm_host, NULL, FALSE);
++}
++
++static void rm_prompt_end(void) {
++    rm_prompt = 0;
++    if (rm_edit) ShowWindow(rm_edit, SW_HIDE);
++    rm_refresh_video();
++    SetFocus(rm_host);
++    InvalidateRect(rm_host, NULL, FALSE);
++}
++
++static void rm_prompt_confirm(void) {
++    wchar_t buf[64] = L"";
++    if (rm_edit) GetWindowTextW(rm_edit, buf, 64);
++    size_t n = wcslen(buf);
++    while (n > 0 && (buf[n - 1] == L' ' || buf[n - 1] == L'\t')) buf[--n] = 0;
++    wchar_t *p = buf;
++    while (*p == L' ' || *p == L'\t') p++;
++    if (!*p) {
++        MessageBeep(MB_OK);
++        return;
++    }
++    int mode = rm_prompt;
++    wcsncpy(rm_name_result, p, 63);
++    rm_name_result[63] = 0;
++    wcsncpy(rm_device_name, rm_name_result, 63);
++    rm_device_name[63] = 0;
++    rm_prompt_end();
++    if (mode == 1) {
++        if (rm_name_event) SetEvent(rm_name_event);
++    } else if (rm_rename_cb) {
++        rm_rename_cb(rm_name_result);
++    }
++}
++
++static void rm_prompt_cancel(void) {
++    if (rm_prompt == 2) rm_prompt_end();      /* the first-run prompt cannot be cancelled */
 +}
 +
 +static LRESULT CALLBACK rm_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -1137,7 +1340,7 @@ index 0000000..a680df7
 +            if (r) return HTRIGHT;
 +            if (t) return HTTOP;
 +            if (b) return HTBOTTOM;
-+            if (pt.y < RM_TITLE_H && rm_button_at(pt.x, pt.y, cr.right) == 0 && !rm_in_update(pt.x, pt.y, cr.right)) return HTCAPTION;
++            if (pt.y < RM_TITLE_H && rm_button_at(pt.x, pt.y, cr.right) == 0 && !rm_in_update(pt.x, pt.y, cr.right) && !rm_in_name(pt.x, pt.y, cr.right)) return HTCAPTION;
 +        }
 +        return HTCLIENT;
 +    }
@@ -1149,6 +1352,29 @@ index 0000000..a680df7
 +    }
 +    case WM_SIZE:
 +        rm_layout();
++        InvalidateRect(hwnd, NULL, FALSE);
++        return 0;
++    case WM_CTLCOLOREDIT: {
++        HDC d = (HDC) wp;
++        SetTextColor(d, RM_COL_TEXT);
++        SetBkColor(d, RM_COL_BAR);
++        return (LRESULT) rm_brush_edit;
++    }
++    case RM_MSG_PROMPT:
++        rm_prompt_begin((int) wp);
++        return 0;
++    case RM_MSG_PROMPT_OK:
++        rm_prompt_confirm();
++        return 0;
++    case RM_MSG_PROMPT_CANCEL:
++        rm_prompt_cancel();
++        return 0;
++    case RM_MSG_PIN:
++        if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
++        {
++            FLASHWINFO fi = {sizeof(fi), hwnd, FLASHW_ALL | FLASHW_TIMERNOFG, 3, 0};
++            FlashWindowEx(&fi);
++        }
 +        InvalidateRect(hwnd, NULL, FALSE);
 +        return 0;
 +    case WM_ERASEBKGND:
@@ -1190,6 +1416,19 @@ index 0000000..a680df7
 +            if (rm_update_cb) rm_update_cb();
 +            return 0;
 +        }
++        if (rm_prompt) {
++            RECT er, br;
++            int ty;
++            rm_prompt_rects(cr.right, cr.bottom, &er, &br, &ty);
++            POINT cp = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
++            if (PtInRect(&br, cp)) PostMessage(hwnd, RM_MSG_PROMPT_OK, 0, 0);
++            return 0;
++        }
++        if (rm_in_name(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), cr.right)) {
++            wcsncpy(rm_prompt_initial, rm_device_name, 63);
++            PostMessage(hwnd, RM_MSG_PROMPT, 2, 0);
++            return 0;
++        }
 +        switch (rm_button_at(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), cr.right)) {
 +        case 1: ShowWindow(hwnd, SW_MINIMIZE); break;
 +        case 2: rm_set_fullscreen(!rm_is_fullscreen); break;
@@ -1220,6 +1459,10 @@ index 0000000..a680df7
 +        break;
 +    case WM_TIMER:
 +        if (wp == 1 && rm_state_cb) {
++            if (rm_pin[0] && (GetTickCount() - rm_pin_tick) >= 180000) {   /* hide an old pairing code */
++                rm_pin[0] = 0;
++                InvalidateRect(hwnd, NULL, FALSE);
++            }
 +            rm_apply_state(rm_state_cb());
 +        } else if (wp == 2) {
 +            ExitProcess(0);                    /* graceful shutdown did not finish in time */
@@ -1262,6 +1505,10 @@ index 0000000..a680df7
 +    rm_font_title = rm_make_font(15, FW_SEMIBOLD);
 +    rm_font_small = rm_make_font(13, FW_NORMAL);
 +    rm_font_hint = rm_make_font(15, FW_NORMAL);
++    rm_font_big = rm_make_font(30, FW_SEMIBOLD);
++    rm_font_pin = rm_make_font(76, FW_SEMIBOLD);
++    rm_font_edit = rm_make_font(19, FW_NORMAL);
++    rm_brush_edit = CreateSolidBrush(RM_COL_BAR);
 +    rm_icon_big = (HICON) LoadImageA(NULL, rm_icon_path, IMAGE_ICON, 32, 32, LR_LOADFROMFILE);
 +    rm_icon_small = (HICON) LoadImageA(NULL, rm_icon_path, IMAGE_ICON, 20, 20, LR_LOADFROMFILE);
 +    HBITMAP lb = (HBITMAP) LoadImageA(NULL, rm_logo_path, IMAGE_BITMAP, 0, 0, LR_LOADFROMFILE | LR_CREATEDIBSECTION);
@@ -1361,6 +1608,34 @@ index 0000000..a680df7
 +
 +static uintptr_t rm_ui_video_handle(void) { return (uintptr_t) rm_video; }
 +
++/* First run: show the "name this receiver" screen and wait (blocks the calling thread) until the user confirms. */
++static bool rm_ui_ask_name(const wchar_t *initial, wchar_t *out, int outlen) {
++    if (!rm_host) return false;
++    wcsncpy(rm_prompt_initial, initial, 63);
++    rm_prompt_initial[63] = 0;
++    rm_name_event = CreateEventA(NULL, TRUE, FALSE, NULL);
++    PostMessage(rm_host, RM_MSG_PROMPT, 1, 0);
++    WaitForSingleObject(rm_name_event, INFINITE);
++    wcsncpy(out, rm_name_result, outlen - 1);
++    out[outlen - 1] = 0;
++    return true;
++}
++
++static void rm_ui_set_device_name(const wchar_t *name) {
++    wcsncpy(rm_device_name, name, 63);
++    rm_device_name[63] = 0;
++    if (rm_host) InvalidateRect(rm_host, NULL, FALSE);
++}
++
++static void rm_ui_set_rename_cb(void (*cb)(const wchar_t *name)) { rm_rename_cb = cb; }
++
++/* Show the pairing code on the waiting screen (and bring the window forward). */
++static void rm_ui_show_pin(const char *pin) {
++    snprintf(rm_pin, sizeof(rm_pin), "%s", pin ? pin : "");
++    rm_pin_tick = GetTickCount();
++    if (rm_host) PostMessage(rm_host, RM_MSG_PIN, 0, 0);
++}
++
 +#else  /* not Windows */
 +
 +typedef int (*rm_state_fn)(void);
@@ -1368,11 +1643,12 @@ index 0000000..a680df7
 +static bool rm_ui_start(const char *a, const char *b, rm_state_fn c, rm_close_fn d, bool e) { (void) a; (void) b; (void) c; (void) d; (void) e; return false; }
 +static uintptr_t rm_ui_video_handle(void) { return 0; }
 +static void rm_ui_set_update(const char *label, void (*cb)(void)) { (void) label; (void) cb; }
++static void rm_ui_show_pin(const char *pin) { (void) pin; }
 +
 +#endif
 +#endif /* RM_WINDOW_H */
 diff --git a/renderers/video_renderer.c b/renderers/video_renderer.c
-index b6c1f1c..67b0717 100644
+index b6c1f1c..f29fb74 100644
 --- a/renderers/video_renderer.c
 +++ b/renderers/video_renderer.c
 @@ -23,6 +23,9 @@
@@ -1581,7 +1857,7 @@ index b6c1f1c..67b0717 100644
                                                seek_position);
      if (result) {
          g_print("seek succeeded\n");
-@@ -1218,6 +1306,54 @@ bool video_renderer_eos_watch() {
+@@ -1218,6 +1306,147 @@ bool video_renderer_eos_watch() {
      return false; 
  }
  
@@ -1616,6 +1892,99 @@ index b6c1f1c..67b0717 100644
 +#endif
 +}
 +
++#ifdef _WIN32
++/* The receiver's name is stored per Windows user in %APPDATA%\Rubenchik Mirror\device-name.txt (UTF-8). */
++static bool rm_name_file(wchar_t *path, size_t n, bool create_dir) {
++    wchar_t appdata[MAX_PATH];
++    DWORD len = GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH);
++    if (len == 0 || len >= MAX_PATH) return false;
++    _snwprintf(path, n, L"%ls\\Rubenchik Mirror", appdata);
++    if (create_dir) CreateDirectoryW(path, NULL);
++    _snwprintf(path, n, L"%ls\\Rubenchik Mirror\\device-name.txt", appdata);
++    return true;
++}
++
++static bool rm_name_load(wchar_t *out, int n) {
++    wchar_t path[MAX_PATH + 64];
++    if (!rm_name_file(path, MAX_PATH + 64, false)) return false;
++    FILE *f = _wfopen(path, L"rb");
++    if (!f) return false;
++    char buf[256];
++    size_t r = fread(buf, 1, sizeof(buf) - 1, f);
++    fclose(f);
++    buf[r] = '\0';
++    char *s = buf;
++    if ((unsigned char) s[0] == 0xEF && (unsigned char) s[1] == 0xBB && (unsigned char) s[2] == 0xBF) s += 3;   /* BOM */
++    size_t l = strlen(s);
++    while (l > 0 && (s[l - 1] == '\r' || s[l - 1] == '\n' || s[l - 1] == ' ' || s[l - 1] == '\t')) s[--l] = '\0';
++    if (!*s) return false;
++    return MultiByteToWideChar(CP_UTF8, 0, s, -1, out, n) > 0;
++}
++
++static void rm_name_save(const wchar_t *name) {
++    wchar_t path[MAX_PATH + 64];
++    if (!rm_name_file(path, MAX_PATH + 64, true)) return;
++    char utf8[256];
++    if (WideCharToMultiByte(CP_UTF8, 0, name, -1, utf8, sizeof(utf8), NULL, NULL) <= 0) return;
++    FILE *f = _wfopen(path, L"wb");
++    if (!f) return;
++    fputs(utf8, f);
++    fclose(f);
++}
++
++/* rename from the title bar: save the name, start a new copy of the app (it waits a few seconds so that the network
++   ports are free) and close this one */
++static void rm_rename_apply(const wchar_t *name) {
++    rm_name_save(name);
++    wchar_t exe[MAX_PATH];
++    if (GetModuleFileNameW(NULL, exe, MAX_PATH) > 0) {
++        wchar_t line[4096];
++        _snwprintf(line, 4096, L"%ls", GetCommandLineW());
++        SetEnvironmentVariableW(L"RUBENCHIK_DELAY_MS", L"3500");
++        STARTUPINFOW si;
++        PROCESS_INFORMATION pi;
++        memset(&si, 0, sizeof(si));
++        si.cb = sizeof(si);
++        memset(&pi, 0, sizeof(pi));
++        if (CreateProcessW(exe, line, NULL, NULL, FALSE, DETACHED_PROCESS, NULL, NULL, &si, &pi)) {
++            CloseHandle(pi.hThread);
++            CloseHandle(pi.hProcess);
++        }
++        SetEnvironmentVariableW(L"RUBENCHIK_DELAY_MS", NULL);
++    }
++    if (rm_close_cb) rm_close_cb(); else ExitProcess(0);
++}
++#endif
++
++/* Returns the receiver's name (UTF-8) for the iPhone's list. The first time, the window asks for it and this call waits;
++   afterwards the saved name is used. Returns false when the host window is not in use. */
++bool video_renderer_ui_device_name(char *out_utf8, size_t outlen) {
++#ifdef _WIN32
++    if (!rm_host) return false;
++    wchar_t name[64] = L"";
++    if (!rm_name_load(name, 64)) {
++        wchar_t pc[64] = L"PC";
++        DWORD pcl = 64;
++        GetComputerNameW(pc, &pcl);
++        wchar_t suggestion[64];
++        _snwprintf(suggestion, 64, L"Rubenchik Mirror (%ls)", pc);
++        suggestion[63] = 0;
++        if (!rm_ui_ask_name(suggestion, name, 64)) return false;
++        rm_name_save(name);
++    }
++    rm_ui_set_device_name(name);
++    rm_ui_set_rename_cb(rm_rename_apply);
++    return WideCharToMultiByte(CP_UTF8, 0, name, -1, out_utf8, (int) outlen, NULL, NULL) > 0;
++#else
++    (void) out_utf8; (void) outlen;
++    return false;
++#endif
++}
++
++void video_renderer_ui_show_pin(const char *pin) {
++    rm_ui_show_pin(pin);
++}
++
 +void video_renderer_set_speed(float rate) {
 +    if (hls_video && use_mpv) {
 +        mpv_speed = (double) rate;
@@ -1636,7 +2005,7 @@ index b6c1f1c..67b0717 100644
  void video_renderer_hls_set_volume(double volume) {
      if (!renderer || strcmp(renderer->codec, hls)) {
         return;
-@@ -1225,6 +1361,10 @@ void video_renderer_hls_set_volume(double volume) {
+@@ -1225,6 +1454,10 @@ void video_renderer_hls_set_volume(double volume) {
      volume = (volume > 10.0) ? 10.0 : volume;
      volume = (volume < 0.0) ? 0.0 : volume;
      hls_volume_level = (gdouble) volume;
@@ -1648,21 +2017,23 @@ index b6c1f1c..67b0717 100644
          g_object_set(renderer->pipeline, "volume", volume, NULL);
      }
 diff --git a/renderers/video_renderer.h b/renderers/video_renderer.h
-index 4a6e012..567164a 100644
+index 4a6e012..706777e 100644
 --- a/renderers/video_renderer.h
 +++ b/renderers/video_renderer.h
-@@ -83,6 +83,9 @@ int video_renderer_choose_codec_and_size (bool video_is_jpeg, bool video_is_h265
+@@ -83,6 +83,11 @@ int video_renderer_choose_codec_and_size (bool video_is_jpeg, bool video_is_h265
  unsigned int video_renderer_listen(void *loop, int id);
  bool video_renderer_eos_watch();
  void video_renderer_hls_set_volume(double volume);
 +void video_renderer_set_speed(float rate);
 +bool video_renderer_ui_start(bool start_fullscreen, void (*on_close)(void));
++bool video_renderer_ui_device_name(char *out_utf8, size_t outlen);
++void video_renderer_ui_show_pin(const char *pin);
 +void video_renderer_select_media(int sub_on, const char *sub_lang, const char *audio_lang, const char *audio_name);
  void video_renderer_set_window_handle(uintptr_t handle);
  bool gstreamer_decoder_check(const char *decoder);
  #ifdef __cplusplus
 diff --git a/uxplay.cpp b/uxplay.cpp
-index 5ad4e39..d83a59a 100644
+index 5ad4e39..194f574 100644
 --- a/uxplay.cpp
 +++ b/uxplay.cpp
 @@ -73,6 +73,9 @@
@@ -1687,7 +2058,15 @@ index 5ad4e39..d83a59a 100644
  #else
  static void CtrlHandler(int signum) {
      cleanup();
-@@ -3106,14 +3114,23 @@ extern "C" void on_video_scrub(void *cls, const float position) {
+@@ -2681,6 +2689,7 @@ extern "C" int video_set_codec_and_size(void *cls, video_codec_t codec, unsigned
+ extern "C" void display_pin(void *cls, char *pin) {
+     int margin = 10;
+     int spacing = 3;
++    video_renderer_ui_show_pin(pin);    /* Rubenchik Mirror: also show the code in the window */
+     char *image = create_pin_display(pin, margin, spacing);
+     if (!image) {
+         LOGE("create_pin_display could not create pin image, pin = %s", pin);
+@@ -3106,14 +3115,23 @@ extern "C" void on_video_scrub(void *cls, const float position) {
  extern "C" void on_video_rate(void *cls, const float rate) {
      LOGI("on_video_rate = %7.5f\n", rate);
      if (rate == 1.0f) {
@@ -1711,7 +2090,7 @@ index 5ad4e39..d83a59a 100644
  
  
  extern "C" float on_video_playlist_remove (void *cls) {
-@@ -3216,6 +3233,7 @@ static int start_raop_server (unsigned short display[5], unsigned short tcp[3],
+@@ -3216,6 +3234,7 @@ static int start_raop_server (unsigned short display[5], unsigned short tcp[3],
      raop_cbs.on_video_play = on_video_play;
      raop_cbs.on_video_scrub = on_video_scrub;
      raop_cbs.on_video_rate = on_video_rate;
@@ -1719,7 +2098,7 @@ index 5ad4e39..d83a59a 100644
      raop_cbs.on_video_stop = on_video_stop;
      raop_cbs.on_video_playlist_remove = on_video_playlist_remove;
      raop_cbs.on_video_acquire_playback_info = on_video_acquire_playback_info;
-@@ -3377,6 +3395,15 @@ int main (int argc, char *argv[]) {
+@@ -3377,6 +3396,20 @@ int main (int argc, char *argv[]) {
  void real_main (int argc, char *argv[]) {
  #else
  int main (int argc, char *argv[]) {
@@ -1728,6 +2107,11 @@ index 5ad4e39..d83a59a 100644
 +    /* Rubenchik Mirror: hardware H.264/VP9 decoders (Direct3D 11/12, NVDEC) are unreliable on many Windows systems
 +       and make HLS (YouTube) playback freeze on the first frame. Prefer software decoding unless the user sets
 +       GST_PLUGIN_FEATURE_RANK himself. Must run before gst_init(). */
++    {
++        /* set by a copy of the app that was started by a rename: wait until the old copy has released the network ports */
++        const char *delay = getenv("RUBENCHIK_DELAY_MS");
++        if (delay) Sleep((DWORD) atoi(delay));
++    }
 +    if (!getenv("GST_PLUGIN_FEATURE_RANK")) {
 +        _putenv("GST_PLUGIN_FEATURE_RANK=d3d12h264dec:NONE,d3d11h264dec:NONE,nvh264dec:NONE,nvh264sldec:NONE,"
 +                "nvautogpuh264dec:NONE,d3d12vp9dec:NONE,d3d11vp9dec:NONE,nvvp9dec:NONE");
@@ -1735,7 +2119,7 @@ index 5ad4e39..d83a59a 100644
  #endif
      std::vector<char> server_hw_addr;
      std::string config_file = "";
-@@ -3475,7 +3502,20 @@ int main (int argc, char *argv[]) {
+@@ -3475,7 +3508,20 @@ int main (int argc, char *argv[]) {
                  std::replace(lang_system.begin(), lang_system.end(), '_', '-');
              }
          }
@@ -1757,7 +2141,7 @@ index 5ad4e39..d83a59a 100644
      }
  
  #ifdef _WIN32    /*  use utf-8 terminal output; don't buffer stdout in WIN32 when debug_log = false */
-@@ -3572,6 +3612,12 @@ int main (int argc, char *argv[]) {
+@@ -3572,6 +3618,19 @@ int main (int argc, char *argv[]) {
          display[3] = 1; /* set fps to 1 frame per sec when no video will be shown */
      }
  
@@ -1765,12 +2149,19 @@ index 5ad4e39..d83a59a 100644
 +    /* Rubenchik Mirror: branded host window; the "fs" option then means "start fullscreen" for the host window */
 +    if (use_video && video_renderer_ui_start(fullscreen, rm_on_close)) {
 +        fullscreen = false;
++        /* name of this receiver in the iPhone's list: asked on the first run, then remembered (see the window) */
++        char chosen[256];
++        if (video_renderer_ui_device_name(chosen, sizeof(chosen))) {
++            server_name = chosen;
++            server_name_is_utf8 = true;
++            do_append_hostname = false;
++        }
 +    }
 +#endif
      if (fullscreen && use_video) {
          if (videosink == "waylandsink" || videosink == "vaapisink") {
              videosink_options.append(" fullscreen=true");
-@@ -3787,6 +3833,17 @@ int main (int argc, char *argv[]) {
+@@ -3787,6 +3846,17 @@ int main (int argc, char *argv[]) {
                                  video_decoder.c_str(), video_converter.c_str(), videosink.c_str(),
                                  videosink_options.c_str(), fullscreen, video_sync, h265_support,
                                  render_coverart, playbin_version, uri);

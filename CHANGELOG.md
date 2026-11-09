@@ -2,6 +2,11 @@
 
 Release notes are also published on the [Releases page](https://github.com/OlegRubenchik/rubenchik-mirror/releases).
 
+## Unreleased
+
+- **Pairing code is shown in the window.** UxPlay only printed the PIN to the console, which the app now closes, so a new iPhone was asked for a code that could not be seen. The window now shows it in large digits (and comes forward if minimized).
+- **Choose the receiver's name.** The first start asks for a name ("Living Room"...) that appears in the iPhone's Screen Mirroring list, so several PCs in one home are no longer all called "Rubenchik Mirror". It is saved per Windows user and can be changed by clicking the name in the title bar (the app restarts to apply it).
+
 ## 1.3.1
 
 - **In-app updater:** a green *Update vX.Y.Z* button appears in the window title bar when a newer release exists. It downloads the installer, verifies its SHA-256 against the checksum published with the release, runs it silently and restarts the app. The settings file (`uxplayrc`) is no longer overwritten by the installer on updates.

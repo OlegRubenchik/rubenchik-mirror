@@ -18,7 +18,7 @@
 
 ## Features
 
-- Shows up as **"Rubenchik Mirror"** in the iPhone / iPad *Screen Mirroring* list. No app needed on the phone.
+- Shows up in the iPhone / iPad *Screen Mirroring* list under **a name you choose** (for example "Living Room"): the app asks for it on the first start, so several PCs in one home can be told apart. No app needed on the phone.
 - **One branded window** for everything: a logo "waiting" screen, a minimal title bar (minimize, fullscreen, close, drag to move, resize from the edges), and the video drawn inside it. Fullscreen with F11, Alt+Enter or the title-bar button.
 - **Screen mirroring** with hardware-accelerated Direct3D 11 rendering, up to 1080p / 60 fps, with audio.
 - **YouTube from the iPhone app:** tap the AirPlay icon in the YouTube app and the video plays on the PC in up to 1440p, with the phone as a remote control: play/pause, seeking, playback speed, volume, subtitles, switching to another video (the window stays open). The original audio track is used by default. Playback is done by the bundled [mpv](https://mpv.io/).
@@ -44,9 +44,11 @@
 
 ### Screen mirroring
 
-On the iPhone: open **Control Center → Screen Mirroring → Rubenchik Mirror**. The screen appears in the Rubenchik Mirror window. Drag the title bar to move the window, use the title-bar buttons or **F11 / Alt+Enter** for fullscreen (**Esc** leaves fullscreen), and stop mirroring on the iPhone or close the window to disconnect.
+**First start:** the window asks you to **name this receiver** (it suggests `Rubenchik Mirror (<PC name>)`). Use a different name for every PC, e.g. *Living Room* or *Bedroom*. The name is saved per Windows user in `%APPDATA%\Rubenchik Mirror\device-name.txt`. To change it later, click the name shown in the title bar, type a new one and press *Save* (the app restarts to apply it).
 
-**PIN:** the first time an iPhone connects, a 4-digit code appears on the PC screen and the iPhone asks for it. After you enter it once, the iPhone remembers this PC and does not ask again (to be asked again, make the iPhone forget the receiver). To change this later, add or remove the line `pin` in `uxplayrc` (use `pw yourpassword`, at least 6 characters, instead for a fixed password). PIN protection stops casual use by other devices on your network but does not add encryption beyond what AirPlay already does.
+On the iPhone: open **Control Center → Screen Mirroring** and pick the name you chose. The screen appears in the Rubenchik Mirror window. Drag the title bar to move the window, use the title-bar buttons or **F11 / Alt+Enter** for fullscreen (**Esc** leaves fullscreen), and stop mirroring on the iPhone or close the window to disconnect.
+
+**PIN:** the first time an iPhone connects, the iPhone asks for a code and the Rubenchik Mirror window shows it in large digits ("Enter this code on your iPhone"; the window is brought forward if it was minimized). After you enter it once, the iPhone remembers this PC and does not ask again (to be asked again, make the iPhone forget the receiver). To change this later, add or remove the line `pin` in `uxplayrc` (use `pw yourpassword`, at least 6 characters, instead for a fixed password). PIN protection stops casual use by other devices on your network but does not add encryption beyond what AirPlay already does.
 
 To mirror to a TV, connect the laptop by HDMI and make the TV the main display (Win+P → *Duplicate* or *Second screen only*), then use fullscreen.
 
