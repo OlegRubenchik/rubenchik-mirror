@@ -232,10 +232,10 @@ index dd9c774..71d1cfa 100644
  
 diff --git a/renderers/mpv_hls.h b/renderers/mpv_hls.h
 new file mode 100644
-index 0000000..425f71a
+index 0000000..15940eb
 --- /dev/null
 +++ b/renderers/mpv_hls.h
-@@ -0,0 +1,395 @@
+@@ -0,0 +1,405 @@
 +/*
 + * Rubenchik Mirror: optional mpv backend for AirPlay HLS (YouTube) playback on Windows.
 + *
@@ -269,6 +269,9 @@ index 0000000..425f71a
 +static bool mpv_lock_init = false;
 +static int mpv_req_id = 0;
 +static DWORD mpv_idle_since = 0;   /* tick count when playback stopped; 0 = playing */
++static uintptr_t mpv_wid = 0;      /* host window to embed mpv into (0: mpv opens its own window) */
++
++static void mpv_hls_set_wid(uintptr_t wid) { mpv_wid = wid; }
 +
 +static void mpv_hls_lock(void) {
 +    if (!mpv_lock_init) {
@@ -422,11 +425,16 @@ index 0000000..425f71a
 +            }
 +        }
 +    }
++    char widopt[160] = "";
++    if (mpv_wid) {
++        snprintf(widopt, sizeof(widopt), "--wid=%llu --no-input-default-bindings --no-input-cursor --cursor-autohide=always ", (unsigned long long) mpv_wid);
++        fullscreen = false;   /* the host window handles fullscreen */
++    }
 +    char cmdline[4096];
 +    snprintf(cmdline, sizeof(cmdline),
 +             "\"%s\" --no-config --idle=yes --force-window=yes --title=\"%s\" --input-ipc-server=%s --keep-open=no "
-+             "--osc=no --no-terminal --ytdl=no --hwdec=auto-safe --cache=yes --demuxer-lavf-analyzeduration=2 %s--volume=%d %s",
-+             exe, title ? title : "Rubenchik Mirror", pipe_name, logopt,
++             "--osc=no --no-terminal --ytdl=no --hwdec=auto-safe --cache=yes --demuxer-lavf-analyzeduration=2 %s%s--volume=%d %s",
++             exe, title ? title : "Rubenchik Mirror", pipe_name, logopt, widopt,
 +             (int) (volume * 100.0 > 100.0 ? 100 : volume * 100.0), fullscreen ? "--fs" : "");
 +    STARTUPINFOA si;
 +    PROCESS_INFORMATION pi;
@@ -620,6 +628,8 @@ index 0000000..425f71a
 +#else  /* not Windows: backend unavailable */
 +
 +static bool mpv_hls_available(void) { return false; }
++static void mpv_hls_set_wid(uintptr_t wid) { (void) wid; }
++static bool mpv_hls_alive(void) { return false; }
 +static bool mpv_hls_start(const char *url, double start_pos, bool fullscreen, double volume, const char *title) { (void) url; (void) start_pos; (void) fullscreen; (void) volume; (void) title; return false; }
 +static void mpv_hls_stop(void) {}
 +static void mpv_hls_set_pause(bool pause) { (void) pause; }
@@ -631,19 +641,465 @@ index 0000000..425f71a
 +
 +#endif
 +#endif /* MPV_HLS_H */
+diff --git a/renderers/rm_window.h b/renderers/rm_window.h
+new file mode 100644
+index 0000000..70019ce
+--- /dev/null
++++ b/renderers/rm_window.h
+@@ -0,0 +1,439 @@
++/*
++ * Rubenchik Mirror: branded host window (Windows only, header-only).
++ *
++ * One minimal window with a custom title bar (minimize / fullscreen / close, drag to move, resize from the edges),
++ * a logo "waiting" screen, and a child surface into which the video renderers draw:
++ *   - GStreamer sinks (screen mirroring) through GstVideoOverlay, see video_renderer_set_window_handle();
++ *   - mpv (YouTube / HLS) through --wid.
++ *
++ * License: GPL-3.0-or-later (same as UxPlay).
++ */
++#ifndef RM_WINDOW_H
++#define RM_WINDOW_H
++
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++#ifdef _WIN32
++#include <windows.h>
++#include <windowsx.h>
++
++#define RM_TITLE_H   38
++#define RM_BTN_W     46
++#define RM_RESIZE_B  6
++
++#define RM_COL_BG      RGB(0x0B, 0x0D, 0x10)
++#define RM_COL_BAR     RGB(0x14, 0x17, 0x1C)
++#define RM_COL_TEXT    RGB(0xE6, 0xE8, 0xEB)
++#define RM_COL_MUTED   RGB(0x8A, 0x93, 0x9E)
++#define RM_COL_GREEN   RGB(0x4A, 0xDE, 0x80)
++#define RM_COL_HOVER   RGB(0x25, 0x2A, 0x31)
++#define RM_COL_CLOSE   RGB(0xE5, 0x48, 0x4D)
++
++/* returns 0: idle (waiting), 1: mirroring the screen, 2: playing a video (YouTube) */
++typedef int (*rm_state_fn)(void);
++typedef void (*rm_close_fn)(void);
++
++static HWND rm_host = NULL;
++static HWND rm_video = NULL;
++static HBITMAP rm_logo = NULL;
++static int rm_logo_w = 0, rm_logo_h = 0;
++static HICON rm_icon_big = NULL, rm_icon_small = NULL;
++static HFONT rm_font_title = NULL, rm_font_small = NULL, rm_font_hint = NULL;
++static bool rm_is_fullscreen = false;
++static bool rm_auto_fullscreen = false;
++static WINDOWPLACEMENT rm_saved_placement;
++static int rm_hover = 0;            /* 0 none, 1 minimize, 2 fullscreen, 3 close */
++static bool rm_tracking = false;
++static int rm_state_now = -1;
++static rm_state_fn rm_state_cb = NULL;
++static rm_close_fn rm_close_cb = NULL;
++static HANDLE rm_ready_event = NULL;
++static char rm_logo_path[MAX_PATH + 32];
++static char rm_icon_path[MAX_PATH + 32];
++
++static int rm_title_h(void) { return rm_is_fullscreen ? 0 : RM_TITLE_H; }
++
++static void rm_layout(void) {
++    if (!rm_host || !rm_video) return;
++    RECT cr;
++    GetClientRect(rm_host, &cr);
++    int th = rm_title_h();
++    MoveWindow(rm_video, 0, th, cr.right, cr.bottom - th > 0 ? cr.bottom - th : 0, TRUE);
++}
++
++static RECT rm_button_rect(int which, int width) {   /* which: 1 minimize, 2 fullscreen, 3 close */
++    RECT r;
++    r.right = width - (3 - which) * RM_BTN_W;
++    r.left = r.right - RM_BTN_W;
++    r.top = 0;
++    r.bottom = RM_TITLE_H;
++    return r;
++}
++
++static int rm_button_at(int x, int y, int width) {
++    if (rm_is_fullscreen || y < 0 || y >= RM_TITLE_H) return 0;
++    for (int i = 1; i <= 3; i++) {
++        RECT r = rm_button_rect(i, width);
++        if (x >= r.left && x < r.right) return i;
++    }
++    return 0;
++}
++
++static void rm_set_fullscreen(bool on) {
++    if (!rm_host || on == rm_is_fullscreen) return;
++    if (on) {
++        rm_saved_placement.length = sizeof(rm_saved_placement);
++        GetWindowPlacement(rm_host, &rm_saved_placement);
++        MONITORINFO mi;
++        mi.cbSize = sizeof(mi);
++        GetMonitorInfo(MonitorFromWindow(rm_host, MONITOR_DEFAULTTONEAREST), &mi);
++        rm_is_fullscreen = true;
++        SetWindowPos(rm_host, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left,
++                     mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
++    } else {
++        rm_is_fullscreen = false;
++        SetWindowPlacement(rm_host, &rm_saved_placement);
++        SetWindowPos(rm_host, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
++    }
++    rm_layout();
++    InvalidateRect(rm_host, NULL, FALSE);
++}
++
++static void rm_draw_button_glyph(HDC dc, int which, RECT r, COLORREF col) {
++    HPEN pen = CreatePen(PS_SOLID, 1, col);
++    HPEN old = (HPEN) SelectObject(dc, pen);
++    int cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
++    if (which == 1) {                         /* minimize: line */
++        MoveToEx(dc, cx - 5, cy + 1, NULL); LineTo(dc, cx + 6, cy + 1);
++    } else if (which == 2) {                  /* fullscreen: square (or two squares when already fullscreen) */
++        HBRUSH nb = (HBRUSH) GetStockObject(NULL_BRUSH);
++        HBRUSH ob = (HBRUSH) SelectObject(dc, nb);
++        Rectangle(dc, cx - 5, cy - 5, cx + 6, cy + 6);
++        SelectObject(dc, ob);
++    } else {                                  /* close: cross */
++        MoveToEx(dc, cx - 5, cy - 5, NULL); LineTo(dc, cx + 6, cy + 6);
++        MoveToEx(dc, cx + 5, cy - 5, NULL); LineTo(dc, cx - 6, cy + 6);
++    }
++    SelectObject(dc, old);
++    DeleteObject(pen);
++}
++
++static void rm_paint(HWND hwnd) {
++    PAINTSTRUCT ps;
++    HDC wdc = BeginPaint(hwnd, &ps);
++    RECT cr;
++    GetClientRect(hwnd, &cr);
++    HDC dc = CreateCompatibleDC(wdc);
++    HBITMAP bmp = CreateCompatibleBitmap(wdc, cr.right, cr.bottom);
++    HBITMAP oldbmp = (HBITMAP) SelectObject(dc, bmp);
++    SetBkMode(dc, TRANSPARENT);
++
++    HBRUSH bg = CreateSolidBrush(RM_COL_BG);
++    FillRect(dc, &cr, bg);
++    DeleteObject(bg);
++
++    int th = rm_title_h();
++    if (th) {
++        RECT bar = {0, 0, cr.right, th};
++        HBRUSH bb = CreateSolidBrush(RM_COL_BAR);
++        FillRect(dc, &bar, bb);
++        DeleteObject(bb);
++        if (rm_icon_small) DrawIconEx(dc, 12, (th - 20) / 2, rm_icon_small, 20, 20, 0, NULL, DI_NORMAL);
++        SelectObject(dc, rm_font_title);
++        SetTextColor(dc, RM_COL_TEXT);
++        TextOutA(dc, 42, (th - 18) / 2, "Rubenchik Mirror", 16);
++        SIZE sz;
++        GetTextExtentPoint32A(dc, "Rubenchik Mirror", 16, &sz);
++        const char *status = rm_state_now == 1 ? "Mirroring" : rm_state_now == 2 ? "Playing video" : "Ready";
++        SelectObject(dc, rm_font_small);
++        SetTextColor(dc, rm_state_now > 0 ? RM_COL_GREEN : RM_COL_MUTED);
++        TextOutA(dc, 42 + sz.cx + 14, (th - 16) / 2 + 1, status, (int) strlen(status));
++        for (int i = 1; i <= 3; i++) {
++            RECT r = rm_button_rect(i, cr.right);
++            if (rm_hover == i) {
++                HBRUSH hb = CreateSolidBrush(i == 3 ? RM_COL_CLOSE : RM_COL_HOVER);
++                FillRect(dc, &r, hb);
++                DeleteObject(hb);
++            }
++            rm_draw_button_glyph(dc, i, r, RM_COL_TEXT);
++        }
++    }
++
++    if (rm_state_now <= 0) {
++        RECT area = {0, th, cr.right, cr.bottom};
++        int aw = area.right - area.left, ah = area.bottom - area.top;
++        if (rm_logo && rm_logo_w > 0 && aw > 100 && ah > 100) {
++            /* logo scaled to at most 46% of the width / 50% of the height, centered slightly above the middle */
++            double s1 = (aw * 0.46) / rm_logo_w, s2 = (ah * 0.50) / rm_logo_h;
++            double sc = s1 < s2 ? s1 : s2;
++            if (sc > 1.0) sc = 1.0;
++            int w = (int) (rm_logo_w * sc), h = (int) (rm_logo_h * sc);
++            int x = area.left + (aw - w) / 2, y = area.top + (ah - h) / 2 - ah / 12;
++            HDC mem = CreateCompatibleDC(dc);
++            HBITMAP ob = (HBITMAP) SelectObject(mem, rm_logo);
++            SetStretchBltMode(dc, HALFTONE);
++            SetBrushOrgEx(dc, 0, 0, NULL);
++            StretchBlt(dc, x, y, w, h, mem, 0, 0, rm_logo_w, rm_logo_h, SRCCOPY);
++            SelectObject(mem, ob);
++            DeleteDC(mem);
++            SelectObject(dc, rm_font_hint);
++            SetTextColor(dc, RM_COL_MUTED);
++            const char *hint = "On your iPhone: Control Center  >  Screen Mirroring  >  Rubenchik Mirror";
++            SIZE hs;
++            GetTextExtentPoint32A(dc, hint, (int) strlen(hint), &hs);
++            TextOutA(dc, area.left + (aw - hs.cx) / 2, y + h + 24, hint, (int) strlen(hint));
++            const char *hint2 = "YouTube: tap the AirPlay icon in the YouTube app";
++            GetTextExtentPoint32A(dc, hint2, (int) strlen(hint2), &hs);
++            TextOutA(dc, area.left + (aw - hs.cx) / 2, y + h + 24 + 22, hint2, (int) strlen(hint2));
++        }
++    }
++
++    BitBlt(wdc, 0, 0, cr.right, cr.bottom, dc, 0, 0, SRCCOPY);
++    SelectObject(dc, oldbmp);
++    DeleteObject(bmp);
++    DeleteDC(dc);
++    EndPaint(hwnd, &ps);
++}
++
++static void rm_apply_state(int st) {
++    if (st == rm_state_now) return;
++    int prev = rm_state_now;
++    rm_state_now = st;
++    if (rm_video) ShowWindow(rm_video, st > 0 ? SW_SHOWNA : SW_HIDE);
++    if (st > 0 && prev <= 0 && rm_auto_fullscreen && !rm_is_fullscreen) rm_set_fullscreen(true);
++    if (rm_host) {
++        SetWindowTextA(rm_host, st == 1 ? "Rubenchik Mirror - Mirroring" : st == 2 ? "Rubenchik Mirror - Playing" : "Rubenchik Mirror");
++        InvalidateRect(rm_host, NULL, FALSE);
++    }
++}
++
++static LRESULT CALLBACK rm_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
++    switch (msg) {
++    case WM_NCCALCSIZE:
++        if (wp) return 0;                      /* no standard frame or caption: we draw our own */
++        break;
++    case WM_NCHITTEST: {
++        POINT pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
++        ScreenToClient(hwnd, &pt);
++        RECT cr;
++        GetClientRect(hwnd, &cr);
++        if (!rm_is_fullscreen) {
++            bool l = pt.x < RM_RESIZE_B, r = pt.x >= cr.right - RM_RESIZE_B;
++            bool t = pt.y < RM_RESIZE_B, b = pt.y >= cr.bottom - RM_RESIZE_B;
++            if (t && l) return HTTOPLEFT;
++            if (t && r) return HTTOPRIGHT;
++            if (b && l) return HTBOTTOMLEFT;
++            if (b && r) return HTBOTTOMRIGHT;
++            if (l) return HTLEFT;
++            if (r) return HTRIGHT;
++            if (t) return HTTOP;
++            if (b) return HTBOTTOM;
++            if (pt.y < RM_TITLE_H && rm_button_at(pt.x, pt.y, cr.right) == 0) return HTCAPTION;
++        }
++        return HTCLIENT;
++    }
++    case WM_GETMINMAXINFO: {
++        MINMAXINFO *mm = (MINMAXINFO *) lp;
++        mm->ptMinTrackSize.x = 640;
++        mm->ptMinTrackSize.y = 400;
++        return 0;
++    }
++    case WM_SIZE:
++        rm_layout();
++        InvalidateRect(hwnd, NULL, FALSE);
++        return 0;
++    case WM_ERASEBKGND:
++        return 1;
++    case WM_PAINT:
++        rm_paint(hwnd);
++        return 0;
++    case WM_MOUSEMOVE: {
++        RECT cr;
++        GetClientRect(hwnd, &cr);
++        int h = rm_button_at(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), cr.right);
++        if (h != rm_hover) {
++            rm_hover = h;
++            InvalidateRect(hwnd, NULL, FALSE);
++        }
++        if (!rm_tracking) {
++            TRACKMOUSEEVENT tme = {sizeof(tme), TME_LEAVE, hwnd, 0};
++            TrackMouseEvent(&tme);
++            rm_tracking = true;
++        }
++        return 0;
++    }
++    case WM_MOUSELEAVE:
++        rm_tracking = false;
++        if (rm_hover) {
++            rm_hover = 0;
++            InvalidateRect(hwnd, NULL, FALSE);
++        }
++        return 0;
++    case WM_LBUTTONUP: {
++        RECT cr;
++        GetClientRect(hwnd, &cr);
++        switch (rm_button_at(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), cr.right)) {
++        case 1: ShowWindow(hwnd, SW_MINIMIZE); break;
++        case 2: rm_set_fullscreen(!rm_is_fullscreen); break;
++        case 3: PostMessage(hwnd, WM_CLOSE, 0, 0); break;
++        default: break;
++        }
++        return 0;
++    }
++    case WM_LBUTTONDBLCLK:
++        if (rm_button_at(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), 100000) == 0) rm_set_fullscreen(!rm_is_fullscreen);
++        return 0;
++    case WM_NCLBUTTONDBLCLK:
++        if (wp == HTCAPTION) {
++            rm_set_fullscreen(!rm_is_fullscreen);
++            return 0;
++        }
++        break;
++    case WM_KEYDOWN:
++    case WM_SYSKEYDOWN:
++        if (wp == VK_F11 || (wp == VK_RETURN && (GetKeyState(VK_MENU) & 0x8000))) {
++            rm_set_fullscreen(!rm_is_fullscreen);
++            return 0;
++        }
++        if (wp == VK_ESCAPE && rm_is_fullscreen) {
++            rm_set_fullscreen(false);
++            return 0;
++        }
++        break;
++    case WM_TIMER:
++        if (wp == 1 && rm_state_cb) {
++            rm_apply_state(rm_state_cb());
++        } else if (wp == 2) {
++            ExitProcess(0);                    /* graceful shutdown did not finish in time */
++        }
++        return 0;
++    case WM_CLOSE:
++        SetTimer(hwnd, 2, 4000, NULL);
++        if (rm_close_cb) rm_close_cb(); else ExitProcess(0);
++        return 0;
++    case WM_DESTROY:
++        PostQuitMessage(0);
++        return 0;
++    default:
++        break;
++    }
++    return DefWindowProc(hwnd, msg, wp, lp);
++}
++
++static LRESULT CALLBACK rm_video_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
++    if (msg == WM_ERASEBKGND) {
++        RECT r;
++        GetClientRect(hwnd, &r);
++        FillRect((HDC) wp, &r, (HBRUSH) GetStockObject(BLACK_BRUSH));
++        return 1;
++    }
++    if (msg == WM_LBUTTONDBLCLK || msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) {
++        return SendMessage(GetParent(hwnd), msg == WM_LBUTTONDBLCLK ? WM_LBUTTONDBLCLK : msg, wp, lp);
++    }
++    return DefWindowProc(hwnd, msg, wp, lp);
++}
++
++static HFONT rm_make_font(int px, int weight) {
++    return CreateFontA(-px, 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
++                       CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
++}
++
++static DWORD WINAPI rm_thread(LPVOID arg) {
++    (void) arg;
++    HINSTANCE inst = GetModuleHandle(NULL);
++    rm_font_title = rm_make_font(15, FW_SEMIBOLD);
++    rm_font_small = rm_make_font(13, FW_NORMAL);
++    rm_font_hint = rm_make_font(15, FW_NORMAL);
++    rm_icon_big = (HICON) LoadImageA(NULL, rm_icon_path, IMAGE_ICON, 32, 32, LR_LOADFROMFILE);
++    rm_icon_small = (HICON) LoadImageA(NULL, rm_icon_path, IMAGE_ICON, 20, 20, LR_LOADFROMFILE);
++    HBITMAP lb = (HBITMAP) LoadImageA(NULL, rm_logo_path, IMAGE_BITMAP, 0, 0, LR_LOADFROMFILE | LR_CREATEDIBSECTION);
++    if (lb) {
++        BITMAP bm;
++        GetObject(lb, sizeof(bm), &bm);
++        rm_logo = lb;
++        rm_logo_w = bm.bmWidth;
++        rm_logo_h = bm.bmHeight;
++    }
++
++    WNDCLASSEXA wc;
++    memset(&wc, 0, sizeof(wc));
++    wc.cbSize = sizeof(wc);
++    wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
++    wc.lpfnWndProc = rm_wndproc;
++    wc.hInstance = inst;
++    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
++    wc.hbrBackground = NULL;
++    wc.hIcon = rm_icon_big;
++    wc.hIconSm = rm_icon_small;
++    wc.lpszClassName = "RubenchikMirrorHost";
++    RegisterClassExA(&wc);
++
++    WNDCLASSEXA vc;
++    memset(&vc, 0, sizeof(vc));
++    vc.cbSize = sizeof(vc);
++    vc.style = CS_DBLCLKS;
++    vc.lpfnWndProc = rm_video_wndproc;
++    vc.hInstance = inst;
++    vc.hCursor = LoadCursor(NULL, IDC_ARROW);
++    vc.lpszClassName = "RubenchikMirrorVideo";
++    RegisterClassExA(&vc);
++
++    int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
++    int w = 1280, h = 760;
++    if (w > sw - 80) w = sw - 80;
++    if (h > sh - 80) h = sh - 80;
++    rm_host = CreateWindowExA(WS_EX_APPWINDOW, "RubenchikMirrorHost", "Rubenchik Mirror",
++                              WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
++                              (sw - w) / 2, (sh - h) / 2, w, h, NULL, NULL, inst, NULL);
++    rm_video = CreateWindowExA(0, "RubenchikMirrorVideo", "", WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
++                               0, RM_TITLE_H, w, h - RM_TITLE_H, rm_host, NULL, inst, NULL);
++    rm_layout();
++    ShowWindow(rm_host, SW_SHOW);
++    UpdateWindow(rm_host);
++    SetTimer(rm_host, 1, 200, NULL);
++    rm_apply_state(0);
++    if (rm_ready_event) SetEvent(rm_ready_event);
++
++    MSG m;
++    while (GetMessage(&m, NULL, 0, 0) > 0) {
++        TranslateMessage(&m);
++        DispatchMessage(&m);
++    }
++    return 0;
++}
++
++/* Create the window on its own thread. paths: logo bitmap (24-bit BMP) and icon file (.ico). */
++static bool rm_ui_start(const char *logo_bmp, const char *icon_ico, rm_state_fn state_cb, rm_close_fn close_cb, bool start_fullscreen) {
++    snprintf(rm_logo_path, sizeof(rm_logo_path), "%s", logo_bmp ? logo_bmp : "");
++    snprintf(rm_icon_path, sizeof(rm_icon_path), "%s", icon_ico ? icon_ico : "");
++    rm_state_cb = state_cb;
++    rm_close_cb = close_cb;
++    rm_auto_fullscreen = start_fullscreen;
++    rm_ready_event = CreateEventA(NULL, TRUE, FALSE, NULL);
++    HANDLE th = CreateThread(NULL, 0, rm_thread, NULL, 0, NULL);
++    if (!th) return false;
++    CloseHandle(th);
++    bool ok = (WaitForSingleObject(rm_ready_event, 5000) == WAIT_OBJECT_0) && rm_video != NULL;
++    /* hide the console window when started from a shortcut (it is the only process attached to it) */
++    if (!getenv("RUBENCHIK_CONSOLE")) {
++        HWND con = GetConsoleWindow();
++        DWORD pids[4];
++        if (con && GetConsoleProcessList(pids, 4) == 1) ShowWindow(con, SW_HIDE);
++    }
++    return ok;
++}
++
++static uintptr_t rm_ui_video_handle(void) { return (uintptr_t) rm_video; }
++
++#else  /* not Windows */
++
++typedef int (*rm_state_fn)(void);
++typedef void (*rm_close_fn)(void);
++static bool rm_ui_start(const char *a, const char *b, rm_state_fn c, rm_close_fn d, bool e) { (void) a; (void) b; (void) c; (void) d; (void) e; return false; }
++static uintptr_t rm_ui_video_handle(void) { return 0; }
++
++#endif
++#endif /* RM_WINDOW_H */
 diff --git a/renderers/video_renderer.c b/renderers/video_renderer.c
-index b6c1f1c..f2f1bb8 100644
+index b6c1f1c..1d345da 100644
 --- a/renderers/video_renderer.c
 +++ b/renderers/video_renderer.c
-@@ -23,6 +23,7 @@
+@@ -23,6 +23,8 @@
  #include <gst/gst.h>
  #include <gst/app/gstappsrc.h>
  #include "video_renderer.h"
 +#include "mpv_hls.h"
++#include "rm_window.h"
  #include <gst/video/videooverlay.h>
  
  static uintptr_t external_window_handle = 0;
-@@ -61,6 +62,14 @@ static logger_t *logger = NULL;
+@@ -61,6 +63,15 @@ static logger_t *logger = NULL;
  static bool first_packet = false;
  static bool sync = false;
  static bool hls_video = false;
@@ -652,13 +1108,14 @@ index b6c1f1c..f2f1bb8 100644
 +static bool mpv_started = false;
 +static bool mpv_fs = false;
 +static double mpv_speed = 1.0;
++static volatile int rm_mirror_active = 0;   /* screen mirroring pipeline is running (for the host window) */
 +static int pending_sub_on = -1;    /* -1: no client selection received yet */
 +static char pending_sub_lang[16] = "";
 +static char pending_audio_lang[16] = "";
  #ifdef X_DISPLAY_FIX
  static bool use_x11 = false;
  #endif
-@@ -271,6 +280,12 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
+@@ -271,6 +282,12 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
      GstCaps *caps = NULL;
      bool rtp = (bool) strlen(rtp_pipeline);
      hls_video = (uri != NULL);
@@ -671,7 +1128,7 @@ index b6c1f1c..f2f1bb8 100644
      /* videosink choices that are auto */
      bool auto_videosink = (strstr(videosink, "autovideosink") || strstr(videosink, "fpsdisplaysink"));
  
-@@ -503,6 +518,10 @@ void video_renderer_pause() {
+@@ -503,6 +520,10 @@ void video_renderer_pause() {
      if (!renderer) {
          return;
      }
@@ -682,7 +1139,7 @@ index b6c1f1c..f2f1bb8 100644
      GstStateChangeReturn ret = gst_element_set_state(renderer->pipeline, GST_STATE_PAUSED);
      logger_log(logger, LOGGER_DEBUG, "video renderer pause: %s", gst_element_state_change_return_get_name(ret));
  }
-@@ -511,6 +530,10 @@ void video_renderer_resume() {
+@@ -511,6 +532,10 @@ void video_renderer_resume() {
      if (!renderer) {
          return;
      }
@@ -693,7 +1150,7 @@ index b6c1f1c..f2f1bb8 100644
      gst_element_set_state (renderer->pipeline, GST_STATE_PLAYING);
      GstState state;
      /* wait with timeout 100 msec for pipeline to change state from PAUSED to PLAYING */
-@@ -525,6 +548,21 @@ void video_renderer_resume() {
+@@ -525,6 +550,21 @@ void video_renderer_resume() {
  void video_renderer_start() {
      GstState state;
      const gchar *state_name = NULL;
@@ -715,7 +1172,7 @@ index b6c1f1c..f2f1bb8 100644
      if (hls_video) {
          g_object_set (G_OBJECT (renderer->pipeline), "uri", renderer->uri, NULL);
          gst_element_set_state (renderer->pipeline, GST_STATE_PAUSED);
-@@ -684,6 +722,11 @@ void video_renderer_flush() {
+@@ -684,6 +724,11 @@ void video_renderer_flush() {
  void video_renderer_hls_ready() {
      GstState state;
      GstStateChangeReturn ret;
@@ -727,10 +1184,11 @@ index b6c1f1c..f2f1bb8 100644
      if (renderer && hls_video) {
          logger_log(logger, LOGGER_DEBUG,"video_renderer_hls_ready");
          ret = gst_element_set_state (renderer->pipeline, GST_STATE_READY);
-@@ -695,6 +738,10 @@ void video_renderer_hls_ready() {
+@@ -695,6 +740,11 @@ void video_renderer_hls_ready() {
  }
  
  void video_renderer_stop() {
++    rm_mirror_active = 0;
 +    if (hls_video && use_mpv) {
 +        mpv_hls_stop();
 +        mpv_started = false;
@@ -738,10 +1196,11 @@ index b6c1f1c..f2f1bb8 100644
      if (renderer) {
          logger_log(logger, LOGGER_DEBUG,"video_renderer_stop");
          if (renderer->appsrc) {
-@@ -735,6 +782,10 @@ void video_renderer_set_track_metadata(const char *title, const char *artist, co
+@@ -735,6 +785,11 @@ void video_renderer_set_track_metadata(const char *title, const char *artist, co
  
  static void video_renderer_destroy_instance(video_renderer_t *renderer) {
      if (renderer) {
++        rm_mirror_active = 0;
 +        if (hls_video && use_mpv) {
 +            mpv_hls_stop();
 +            mpv_started = false;
@@ -749,7 +1208,7 @@ index b6c1f1c..f2f1bb8 100644
          logger_log(logger, LOGGER_DEBUG,"destroying renderer instance %p codec=%s ", renderer, renderer->codec);
          GstState state;
          GstStateChangeReturn ret;
-@@ -825,7 +876,7 @@ static void hls_video_seek_to_start_position(GstElement *pipeline) {
+@@ -825,7 +880,7 @@ static void hls_video_seek_to_start_position(GstElement *pipeline) {
          && hls_requested_start_position  <= hls_seek_end) {
          g_print("***************** seek to hls_requested_start_position %" GST_TIME_FORMAT "\n", GST_TIME_ARGS(hls_requested_start_position));
          if (gst_element_seek_simple (pipeline, GST_FORMAT_TIME,
@@ -758,7 +1217,16 @@ index b6c1f1c..f2f1bb8 100644
                                       hls_requested_start_position)) {
              hls_requested_start_position = 0;
          } else {
-@@ -1143,6 +1194,25 @@ bool video_get_playback_info(double *duration, double *position, double *seek_st
+@@ -1116,6 +1171,8 @@ int video_renderer_choose_codec_and_size (bool video_is_jpeg, bool video_is_h265
+                gst_element_state_get_name (old_state),gst_element_state_get_name (new_state));
+     gst_video_pipeline_base_time = gst_element_get_base_time(renderer->appsrc);
+ 
++    rm_mirror_active = 1;
++
+     /* destroy unused renderers */
+     for (int i = 0; i < n_renderers; i++) {
+         if (renderer_type[i] == renderer) {
+@@ -1143,6 +1200,25 @@ bool video_get_playback_info(double *duration, double *position, double *seek_st
          return true;
      }
  
@@ -784,7 +1252,7 @@ index b6c1f1c..f2f1bb8 100644
      if (hls_seek_enabled) {
          *seek_start = ((double) hls_seek_start) / GST_SECOND;
          *seek_duration = ((double) (hls_seek_end - hls_seek_start)) / GST_SECOND;     
-@@ -1185,6 +1255,10 @@ void video_renderer_set_start(float position) {
+@@ -1185,6 +1261,10 @@ void video_renderer_set_start(float position) {
  }
  
  void video_renderer_seek(float position) {
@@ -795,7 +1263,7 @@ index b6c1f1c..f2f1bb8 100644
       gint64 seek_position = (gint64) ((double) position * GST_SECOND);
      /* don't seek to within 1  microsecond  of beginning or end of video */
      if (!renderer || hls_duration < 2000) return;
-@@ -1193,7 +1267,7 @@ void video_renderer_seek(float position) {
+@@ -1193,7 +1273,7 @@ void video_renderer_seek(float position) {
      g_print("SCRUB: seek to %f secs =  %" GST_TIME_FORMAT ", duration = %" GST_TIME_FORMAT "\n", position,
              GST_TIME_ARGS(seek_position),  GST_TIME_ARGS(hls_duration));
      gboolean result = gst_element_seek_simple(renderer->pipeline, GST_FORMAT_TIME,
@@ -804,10 +1272,40 @@ index b6c1f1c..f2f1bb8 100644
                                                seek_position);
      if (result) {
          g_print("seek succeeded\n");
-@@ -1218,6 +1292,23 @@ bool video_renderer_eos_watch() {
+@@ -1218,6 +1298,53 @@ bool video_renderer_eos_watch() {
      return false; 
  }
  
++static int rm_ui_state(void) {
++    if (use_mpv && mpv_started && mpv_hls_alive()) return 2;
++    if (rm_mirror_active) return 1;
++    return 0;
++}
++
++/* Start the branded host window; video is rendered into it. Returns false if the window could not be created
++   (or RUBENCHIK_NO_UI is set): the renderers then open their own windows as usual. */
++bool video_renderer_ui_start(bool start_fullscreen, void (*on_close)(void)) {
++#ifdef _WIN32
++    if (getenv("RUBENCHIK_NO_UI")) return false;
++    char exe[MAX_PATH];
++    DWORD n = GetModuleFileNameA(NULL, exe, MAX_PATH);
++    if (n == 0 || n >= MAX_PATH) return false;
++    char *slash = strrchr(exe, '\\');
++    if (!slash) return false;
++    *slash = 0;                                   /* <app>\bin */
++    char logo[MAX_PATH + 32], icon[MAX_PATH + 32];
++    snprintf(logo, sizeof(logo), "%s\\..\\assets\\idle-logo.bmp", exe);
++    snprintf(icon, sizeof(icon), "%s\\..\\icon.ico", exe);
++    if (!rm_ui_start(logo, icon, rm_ui_state, on_close, start_fullscreen)) return false;
++    video_renderer_set_window_handle(rm_ui_video_handle());
++    mpv_hls_set_wid(rm_ui_video_handle());
++    return true;
++#else
++    (void) start_fullscreen; (void) on_close;
++    return false;
++#endif
++}
++
 +void video_renderer_set_speed(float rate) {
 +    if (hls_video && use_mpv) {
 +        mpv_speed = (double) rate;
@@ -828,7 +1326,7 @@ index b6c1f1c..f2f1bb8 100644
  void video_renderer_hls_set_volume(double volume) {
      if (!renderer || strcmp(renderer->codec, hls)) {
         return;
-@@ -1225,6 +1316,10 @@ void video_renderer_hls_set_volume(double volume) {
+@@ -1225,6 +1352,10 @@ void video_renderer_hls_set_volume(double volume) {
      volume = (volume > 10.0) ? 10.0 : volume;
      volume = (volume < 0.0) ? 0.0 : volume;
      hls_volume_level = (gdouble) volume;
@@ -840,20 +1338,21 @@ index b6c1f1c..f2f1bb8 100644
          g_object_set(renderer->pipeline, "volume", volume, NULL);
      }
 diff --git a/renderers/video_renderer.h b/renderers/video_renderer.h
-index 4a6e012..1f733d1 100644
+index 4a6e012..567164a 100644
 --- a/renderers/video_renderer.h
 +++ b/renderers/video_renderer.h
-@@ -83,6 +83,8 @@ int video_renderer_choose_codec_and_size (bool video_is_jpeg, bool video_is_h265
+@@ -83,6 +83,9 @@ int video_renderer_choose_codec_and_size (bool video_is_jpeg, bool video_is_h265
  unsigned int video_renderer_listen(void *loop, int id);
  bool video_renderer_eos_watch();
  void video_renderer_hls_set_volume(double volume);
 +void video_renderer_set_speed(float rate);
++bool video_renderer_ui_start(bool start_fullscreen, void (*on_close)(void));
 +void video_renderer_select_media(int sub_on, const char *sub_lang, const char *audio_lang, const char *audio_name);
  void video_renderer_set_window_handle(uintptr_t handle);
  bool gstreamer_decoder_check(const char *decoder);
  #ifdef __cplusplus
 diff --git a/uxplay.cpp b/uxplay.cpp
-index 5ad4e39..c0d86f5 100644
+index 5ad4e39..9c5d7ce 100644
 --- a/uxplay.cpp
 +++ b/uxplay.cpp
 @@ -73,6 +73,9 @@
@@ -866,7 +1365,19 @@ index 5ad4e39..c0d86f5 100644
  #ifdef DBUS
  #include <dbus/dbus.h>
  #endif
-@@ -3106,14 +3109,23 @@ extern "C" void on_video_scrub(void *cls, const float position) {
+@@ -725,6 +728,11 @@ static BOOL WINAPI CtrlHandler(DWORD signal) {
+         return FALSE;
+     }
+ }
++
++/* Rubenchik Mirror: close button of the host window = Ctrl+C */
++static void rm_on_close(void) {
++    CtrlHandler(CTRL_C_EVENT);
++}
+ #else
+ static void CtrlHandler(int signum) {
+     cleanup();
+@@ -3106,14 +3114,23 @@ extern "C" void on_video_scrub(void *cls, const float position) {
  extern "C" void on_video_rate(void *cls, const float rate) {
      LOGI("on_video_rate = %7.5f\n", rate);
      if (rate == 1.0f) {
@@ -890,7 +1401,7 @@ index 5ad4e39..c0d86f5 100644
  
  
  extern "C" float on_video_playlist_remove (void *cls) {
-@@ -3216,6 +3228,7 @@ static int start_raop_server (unsigned short display[5], unsigned short tcp[3],
+@@ -3216,6 +3233,7 @@ static int start_raop_server (unsigned short display[5], unsigned short tcp[3],
      raop_cbs.on_video_play = on_video_play;
      raop_cbs.on_video_scrub = on_video_scrub;
      raop_cbs.on_video_rate = on_video_rate;
@@ -898,7 +1409,7 @@ index 5ad4e39..c0d86f5 100644
      raop_cbs.on_video_stop = on_video_stop;
      raop_cbs.on_video_playlist_remove = on_video_playlist_remove;
      raop_cbs.on_video_acquire_playback_info = on_video_acquire_playback_info;
-@@ -3377,6 +3390,15 @@ int main (int argc, char *argv[]) {
+@@ -3377,6 +3395,15 @@ int main (int argc, char *argv[]) {
  void real_main (int argc, char *argv[]) {
  #else
  int main (int argc, char *argv[]) {
@@ -914,7 +1425,7 @@ index 5ad4e39..c0d86f5 100644
  #endif
      std::vector<char> server_hw_addr;
      std::string config_file = "";
-@@ -3475,7 +3497,20 @@ int main (int argc, char *argv[]) {
+@@ -3475,7 +3502,20 @@ int main (int argc, char *argv[]) {
                  std::replace(lang_system.begin(), lang_system.end(), '_', '-');
              }
          }
@@ -936,3 +1447,16 @@ index 5ad4e39..c0d86f5 100644
      }
  
  #ifdef _WIN32    /*  use utf-8 terminal output; don't buffer stdout in WIN32 when debug_log = false */
+@@ -3572,6 +3612,12 @@ int main (int argc, char *argv[]) {
+         display[3] = 1; /* set fps to 1 frame per sec when no video will be shown */
+     }
+ 
++#ifdef _WIN32
++    /* Rubenchik Mirror: branded host window; the "fs" option then means "start fullscreen" for the host window */
++    if (use_video && video_renderer_ui_start(fullscreen, rm_on_close)) {
++        fullscreen = false;
++    }
++#endif
+     if (fullscreen && use_video) {
+         if (videosink == "waylandsink" || videosink == "vaapisink") {
+             videosink_options.append(" fullscreen=true");

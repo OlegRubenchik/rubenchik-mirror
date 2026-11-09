@@ -50,26 +50,28 @@ Source: "{#AppDir}\bin\*"; DestDir: "{app}\bin"; Flags: ignoreversion recursesub
 Source: "{#AppDir}\lib\*"; DestDir: "{app}\lib"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#AppDir}\libexec\*"; DestDir: "{app}\libexec"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#AppDir}\share\*"; DestDir: "{app}\share"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#AppDir}\etc\*"; DestDir: "{app}\etc"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "{#AppDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "uxplayrc.pin"; DestDir: "{app}"; DestName: "uxplayrc"; Flags: ignoreversion; Tasks: pin
 Source: "uxplayrc"; DestDir: "{app}"; DestName: "uxplayrc"; Flags: ignoreversion; Tasks: not pin
 Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\assets\idle-logo.bmp"; DestDir: "{app}\assets"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#AppDir}\UxPlay-LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; Parameters: "-rc ""{app}\uxplayrc"""; WorkingDir: "{app}\bin"; IconFilename: "{app}\icon.ico"; Comment: "AirPlay screen mirroring receiver"; Flags: runminimized
+Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; Parameters: "-rc ""{app}\uxplayrc"""; WorkingDir: "{app}\bin"; IconFilename: "{app}\icon.ico"; Comment: "AirPlay screen mirroring receiver"
 Name: "{autoprograms}\Edit {#AppName} settings"; Filename: "{win}\notepad.exe"; Parameters: """{app}\uxplayrc"""; IconFilename: "{app}\icon.ico"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Parameters: "-rc ""{app}\uxplayrc"""; WorkingDir: "{app}\bin"; IconFilename: "{app}\icon.ico"; Tasks: desktopicon; Flags: runminimized
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Parameters: "-rc ""{app}\uxplayrc"""; WorkingDir: "{app}\bin"; IconFilename: "{app}\icon.ico"; Tasks: desktopicon
 Name: "{commonstartup}\{#AppName}"; Filename: "{app}\{#AppExe}"; Parameters: "-rc ""{app}\uxplayrc"""; WorkingDir: "{app}\bin"; IconFilename: "{app}\icon.ico"; Tasks: autostart; Flags: runminimized
 
 [Run]
 ; Remove any stale rule first, then allow uxplay.exe inbound on private networks.
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""{#FwRule}"""; Flags: runhidden; StatusMsg: "Configuring Windows Firewall..."
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""{#FwRule}"" dir=in action=allow program=""{app}\{#AppExe}"" enable=yes profile=private"; Flags: runhidden; StatusMsg: "Configuring Windows Firewall..."
-Filename: "{app}\{#AppExe}"; Parameters: "-rc ""{app}\uxplayrc"""; WorkingDir: "{app}\bin"; Description: "Start {#AppName} now"; Flags: nowait postinstall skipifsilent runminimized
+Filename: "{app}\{#AppExe}"; Parameters: "-rc ""{app}\uxplayrc"""; WorkingDir: "{app}\bin"; Description: "Start {#AppName} now"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""{#FwRule}"""; Flags: runhidden; RunOnceId: "DelFirewallRule"

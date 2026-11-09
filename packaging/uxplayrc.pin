@@ -5,8 +5,9 @@
 n "Rubenchik Mirror"
 nh
 
-# Fullscreen (works with the Direct3D 11 video sink)
-fs
+# The Rubenchik Mirror window opens windowed. Uncomment to go fullscreen automatically when a video starts
+# (F11 / Esc / Alt+Enter or the title-bar button toggle fullscreen at any time):
+# fs
 
 # Direct3D 11 video sink (Alt+Enter toggles fullscreen)
 vs d3d11videosink
